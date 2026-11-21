@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<meta name="theme-color" content="#14121a" />
+<title>Flipper Test · bac à sable</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #14121a; overflow: hidden; overscroll-behavior: none; }
+  body { font-family: system-ui, -apple-system, sans-serif; color: #fff; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  canvas { display: block; touch-action: none; }
+  #top { position: fixed; top: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: baseline; padding: 10px 14px; pointer-events: none; text-shadow: 0 1px 3px #000; }
+  #score { font: 700 26px ui-monospace, Menlo, monospace; color: #ffd34d; letter-spacing: 1px; }
+  #meta { text-align: right; font-size: 11px; opacity: 0.7; line-height: 1.4; }
+  #power { position: fixed; right: 10px; bottom: 90px; width: 10px; height: 120px; border-radius: 5px; background: rgba(255,255,255,0.15); opacity: 0; transition: opacity .15s; pointer-events: none; overflow: hidden; }
+  #powerFill { position: absolute; bottom: 0; left: 0; right: 0; height: 0; background: linear-gradient(#ff5a3c, #ffd34d); }
+  #hint { position: fixed; left: 0; right: 0; bottom: 0; padding: 18px 16px 28px; background: linear-gradient(transparent, rgba(0,0,0,0.85)); text-align: center; font-size: 14px; line-height: 1.5; pointer-events: none; transition: opacity .4s; }
+  #hint b { color: #ffd34d; }
+  #hint.gone { opacity: 0; }
+</style>
+</head>
+<body>
+<div id="top">
+  <div id="score">0</div>
+  <div id="meta"><div id="speed">–</div><div id="balls"></div></div>
+</div>
+<div id="power"><div id="powerFill"></div></div>
+<div id="hint">Touchez la <b>moitié gauche</b> ou <b>droite</b> de l'écran pour les flippers.<br/>Pour lancer, <b>maintenez à droite</b> puis relâchez.</div>
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>
