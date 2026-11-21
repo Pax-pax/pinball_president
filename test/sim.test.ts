@@ -114,5 +114,70 @@ const cradle = (s: Sim) => {
   check('bumper actif', hit && v >= 1.9, `touché=${hit}, v après=${v.toFixed(2)}`);
 }
 
+const collect = (s: Sim, seconds: number, input: Input = NONE) => {
+  const ev: string[] = [];
+  run(s, seconds, input, () => { for (const e of s.takeEvents()) ev.push(e.type); });
+  return ev;
+};
+
+// 9. Rampe : tir franc dans l'entrée → la bille monte, passe l'épingle et revient par l'inlane gauche
+{
+  const s = fresh();
+  s.placeBall(-0.145, 0.12, 0, -2.4);
+  const ev = collect(s, 2.5);
+  check('rampe réussie à 2,4 m/s', ev.includes('ramp'), `événements: ${[...new Set(ev)].join(', ')}`);
+}
+
+// 10. Rampe : tir trop mou → la bille redescend, pas de rampe comptée, pas coincée
+{
+  const s = fresh();
+  s.placeBall(-0.145, 0.12, 0, -1.0);
+  const ev = collect(s, 2.5);
+  check('rampe ratée à 1 m/s', !ev.includes('ramp') && s.ballPos().y < BALL_R + 0.005, `y=${s.ballPos().y.toFixed(3)}`);
+}
+
+// 11. Slingshot : bille qui roule sur le grand côté → impulsion
+{
+  const s = fresh();
+  s.placeBall(-0.12, 0.25, -0.5, 0.2);
+  const ev = collect(s, 0.8);
+  check('slingshot gauche', ev.includes('sling'), `événements: ${[...new Set(ev)].join(', ')}`);
+}
+
+// 12. Cibles tombantes : 5 tirs → banque complète, puis remontée
+{
+  const s = fresh();
+  const ev: string[] = [];
+  for (const t of s.targets.values()) {
+    s.placeBall(t.x - 0.08, t.z, 1.5, 0);
+    ev.push(...collect(s, 0.35));
+  }
+  const n = ev.filter((e) => e === 'target').length;
+  s.placeBall(CX, -0.3);
+  run(s, 1.5, NONE);
+  const up = [...s.targets.values()].every((t) => !t.down);
+  check('banque de cibles', n === 5 && ev.includes('bank') && up, `${n} cibles, banque=${ev.includes('bank')}, relevées=${up}`);
+}
+
+// 13. Couloir extérieur gauche : la bille y tombe et est perdue
+{
+  const s = fresh();
+  s.placeBall(TABLE.minX + 0.018, 0.2);
+  const ev = collect(s, 2);
+  check('perte par outlane', ev.includes('drain'), `événements: ${[...new Set(ev)].join(', ')}`);
+}
+
+// 14. Tilt : secousses répétées → 2 avertissements puis tilt, flippers coupés
+{
+  const s = fresh();
+  s.placeBall(CX, -0.2);
+  const ev: string[] = [];
+  for (let i = 0; i < 9; i++) { s.nudge(1, 0); ev.push(...collect(s, 0.15)); }
+  const warn = ev.filter((e) => e === 'warning').length;
+  const angle = s.flippers[0].angle;
+  run(s, 0.2, { ...NONE, left: true });
+  check('tilt', warn === 2 && ev.includes('tilt') && s.flippers[0].angle === angle, `avertissements=${warn}, tilt=${ev.includes('tilt')}`);
+}
+
 console.log(failures ? `\n${failures} échec(s)` : '\nTous les tirs passent.');
 process.exit(failures ? 1 : 0);

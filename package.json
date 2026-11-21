@@ -6,7 +6,8 @@
   "scripts": {
     "test": "tsx test/sim.test.ts",
     "dev": "vite",
-    "build": "vite build"
+    "build": "vite build",
+    "sweep": "tsx test/sweep.ts"
   },
   "keywords": [],
   "author": "",

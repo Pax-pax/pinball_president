@@ -13,6 +13,7 @@ const hud = {
   hint: document.getElementById('hint')!,
   score: document.getElementById('score')!,
   balls: document.getElementById('balls')!,
+  banner: document.getElementById('banner')!,
 };
 
 let R: Awaited<ReturnType<typeof initRapier>>;
@@ -54,14 +55,17 @@ scene.add(sun);
 
 const colors: Record<Mat, number> = {
   wall: 0xd9d4c7, metal: 0xb8bcc4, rubber: 0x222222, floor: 0x2b3a55, glass: 0xffffff,
-  flipper: 0xf2f2f2, bumper: 0xe8423c, plunger: 0x999999,
+  flipper: 0xf2f2f2, bumper: 0xe8423c, plunger: 0x999999, ramp: 0x9fd8ff,
 };
 const mats: Partial<Record<Mat, THREE.MeshStandardMaterial>> = {};
 const matFor = (m: Mat) =>
   (mats[m] ??= new THREE.MeshStandardMaterial({
     color: colors[m],
     metalness: m === 'metal' ? 0.9 : 0.05,
-    roughness: m === 'metal' ? 0.25 : 0.6,
+    roughness: m === 'metal' ? 0.25 : m === 'ramp' ? 0.1 : 0.6,
+    transparent: m === 'ramp',
+    opacity: m === 'ramp' ? 0.45 : 1,
+    depthWrite: m !== 'ramp',
   }));
 
 // Plateau : maquette grise avec une grille de 5 cm (pour juger les distances à l'œil)
@@ -78,7 +82,7 @@ function floorTexture() {
   g.font = 'bold 44px system-ui, sans-serif'; g.textAlign = 'center';
   g.fillText('BALLOTTAGE', (CX - TABLE.minX) * px, c.height * 0.55);
   g.font = '24px system-ui, sans-serif';
-  g.fillText('bac à sable physique', (CX - TABLE.minX) * px, c.height * 0.55 + 36);
+  g.fillText('maquette grise', (CX - TABLE.minX) * px, c.height * 0.55 + 36);
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;
   t.anisotropy = 8;
@@ -86,6 +90,7 @@ function floorTexture() {
 }
 
 const bumperCaps = new Map<string, THREE.Mesh>();
+const slingMats = new Map<string, THREE.MeshStandardMaterial>();
 for (const p of sim.staticParts as StaticPart[]) {
   let mesh: THREE.Mesh;
   if (p.kind === 'box') {
@@ -106,7 +111,19 @@ for (const p of sim.staticParts as StaticPart[]) {
       table.add(under);
       continue;
     }
-    mesh.rotation.y = p.rotY;
+    if (p.q) mesh.quaternion.set(...p.q);
+    else mesh.rotation.y = p.rotY;
+  } else if (p.kind === 'prism') {
+    // slingshot : bloc blanc avec bandeau caoutchouc, éclairé au coup
+    const v: THREE.Vector3[] = [];
+    for (const [x, z] of p.pts) v.push(new THREE.Vector3(x, 0, z), new THREE.Vector3(x, p.h, z));
+    const m = new THREE.MeshStandardMaterial({ color: 0xf4efe4, roughness: 0.5, emissive: 0xffd34d, emissiveIntensity: 0 });
+    mesh = new THREE.Mesh(new ConvexGeometry(v), m);
+    if (p.id) slingMats.set(p.id, m);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    table.add(mesh);
+    continue;
   } else {
     const isBumper = p.mat === 'bumper';
     mesh = new THREE.Mesh(new THREE.CylinderGeometry(p.r, p.r, p.hh * 2, 32), matFor(p.mat));
@@ -124,6 +141,19 @@ for (const p of sim.staticParts as StaticPart[]) {
   mesh.castShadow = true;
   mesh.receiveShadow = true;
   table.add(mesh);
+}
+
+// Cibles tombantes (elles s'enfoncent dans le plateau quand on les touche)
+const targetMeshes = new Map<string, THREE.Mesh>();
+for (const t of sim.targets.values()) {
+  const m = new THREE.Mesh(
+    new THREE.BoxGeometry(0.006, 0.035, 0.025),
+    new THREE.MeshStandardMaterial({ color: 0xffd34d, roughness: 0.4 })
+  );
+  m.position.set(t.x, 0.0175, t.z);
+  m.castShadow = true;
+  table.add(m);
+  targetMeshes.set(t.id, m);
 }
 
 // Flippers
@@ -211,6 +241,7 @@ frame();
 // ---------- Commandes ----------
 const input: Input = { left: false, right: false, plunger: false };
 const pointers = new Map<number, 'left' | 'right'>();
+const starts = new Map<number, { x: number; y: number; t: number; nudged: boolean }>();
 const keys = new Set<string>();
 let started = false;
 
@@ -237,17 +268,41 @@ canvas.addEventListener('pointerdown', (e) => {
   firstTouch();
   canvas.setPointerCapture(e.pointerId);
   pointers.set(e.pointerId, e.clientX < window.innerWidth / 2 ? 'left' : 'right');
+  starts.set(e.pointerId, { x: e.clientX, y: e.clientY, t: performance.now(), nudged: false });
   updateInput();
 });
-const up = (e: PointerEvent) => { pointers.delete(e.pointerId); updateInput(); };
+// Secousse : glisser vite un doigt vers le haut (ou en biais). La bille part dans le sens du geste.
+canvas.addEventListener('pointermove', (e) => {
+  const st = starts.get(e.pointerId);
+  if (!st || st.nudged) return;
+  const dx = e.clientX - st.x, dy = e.clientY - st.y;
+  const dt = performance.now() - st.t;
+  if (dt < 250 && Math.hypot(dx, dy) > 45 && dy < -20) {
+    st.nudged = true;
+    sim.nudge(dx / Math.hypot(dx, dy), dy / Math.hypot(dx, dy));
+  }
+});
+const up = (e: PointerEvent) => { pointers.delete(e.pointerId); starts.delete(e.pointerId); updateInput(); };
 canvas.addEventListener('pointerup', up);
 canvas.addEventListener('pointercancel', up);
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
-window.addEventListener('keydown', (e) => { if (e.repeat) return; keys.add(e.code); firstTouch(); updateInput(); if (e.code === 'Space') e.preventDefault(); });
+window.addEventListener('keydown', (e) => {
+  if (e.repeat) return;
+  if (e.code === 'KeyN' || e.code === 'ArrowUp') sim.nudge(0, -1);
+  keys.add(e.code); firstTouch(); updateInput(); if (e.code === 'Space') e.preventDefault(); });
 window.addEventListener('keyup', (e) => { keys.delete(e.code); updateInput(); });
 window.addEventListener('blur', () => { pointers.clear(); keys.clear(); updateInput(); });
 
 const buzz = (ms: number) => { try { navigator.vibrate?.(ms); } catch {} };
+
+// Bandeau d'annonce (rampe, banque, avertissements de tilt)
+let bannerTimer: number | undefined;
+function banner(text: string, alert = false) {
+  hud.banner.textContent = text;
+  hud.banner.className = alert ? 'show alert' : 'show';
+  clearTimeout(bannerTimer);
+  bannerTimer = window.setTimeout(() => (hud.banner.className = ''), alert ? 1600 : 1200);
+}
 
 // ---------- Boucle : physique à pas fixe 480 Hz, découplée de l'affichage ----------
 let acc = 0;
@@ -275,6 +330,13 @@ function tick(now: number) {
     else if (e.type === 'bumper') { buzz(18); score += 100; flash.set(e.id, 0.12); }
     else if (e.type === 'launch') buzz(Math.round(20 + 30 * e.power));
     else if (e.type === 'drain') { buzz(60); ballsLost++; }
+    else if (e.type === 'sling') { buzz(14); score += 10; flash.set(`sling-${e.side}`, 0.1); }
+    else if (e.type === 'target') { buzz(16); score += 250; }
+    else if (e.type === 'bank') { score += 2000; banner('Cibles : banque complète +2 000'); }
+    else if (e.type === 'ramp') { buzz(30); score += 1000; banner('Rampe ! +1 000'); }
+    else if (e.type === 'nudge') buzz(25);
+    else if (e.type === 'warning') { buzz(120); banner(`ATTENTION ${e.count}/2`, true); }
+    else if (e.type === 'tilt') { buzz(400); banner('TILT', true); }
   }
 
   // Synchronisation des meshes
@@ -289,6 +351,15 @@ function tick(now: number) {
   });
   const pt = sim.plunger.translation();
   plungerMesh.position.set(pt.x, pt.y, pt.z);
+  for (const t of sim.targets.values()) {
+    const m = targetMeshes.get(t.id)!;
+    m.position.y += ((t.down ? -0.02 : 0.0175) - m.position.y) * Math.min(1, dt * 25);
+  }
+  for (const [id, m] of slingMats) {
+    const t = Math.max(0, (flash.get(id) ?? 0) - dt);
+    flash.set(id, t);
+    m.emissiveIntensity = t > 0 ? 1.2 : 0;
+  }
   for (const [id, cap] of bumperCaps) {
     const t = Math.max(0, (flash.get(id) ?? 0) - dt);
     flash.set(id, t);

@@ -16,7 +16,7 @@ export const DT = 1 / 480; // pas fixe
 export const TABLE = { minX: -0.255, maxX: 0.255, minZ: -0.535, maxZ: 0.535 };
 export const WT = 0.008; // épaisseur des murs
 export const WALL_H = 0.05;
-export const GLASS_Y = BALL_R * 2 + 0.003; // vitre juste au-dessus de la bille
+export const GLASS_Y = 0.085; // vitre : assez haute pour laisser passer la bille sur la rampe
 
 // Couloir de lancement à droite
 export const LANE_INNER_X = TABLE.maxX - 0.03 - WT / 2; // axe du mur intérieur
@@ -49,7 +49,18 @@ export const BUMPER_R = 0.022;
 export const BUMPER_KICK = 2.0; // m/s
 export const DRAIN_Z = 0.495;
 
-export type Mat = 'wall' | 'metal' | 'rubber' | 'floor' | 'glass' | 'flipper' | 'bumper' | 'plunger';
+// Slingshots, cibles, rampe, tilt
+export const SLING_KICK = 1.5; // m/s
+export const TARGET_RESET_DELAY = 1.0;
+export const NUDGE_DV = 0.25; // m/s donnés à la bille par une secousse
+export const RAMP_W = 0.036; // largeur utile de la rampe
+/** Symétrique par rapport à l'axe de l'aire de jeu. */
+export const mx = (x: number) => 2 * CX - x;
+// Géométrie du bas de table (côté gauche, le droit est le miroir)
+export const SEP_X = -0.22; // séparation couloir extérieur / intérieur
+export const SLING = { a: [-0.18, 0.205], b: [-0.18, 0.355], c: [-0.137, 0.384] } as const;
+
+export type Mat = 'wall' | 'metal' | 'rubber' | 'floor' | 'glass' | 'flipper' | 'bumper' | 'plunger' | 'ramp';
 const MATS: Record<Mat, { e: number; mu: number }> = {
   floor: { e: 0.2, mu: 0.25 },
   wall: { e: 0.45, mu: 0.2 },
@@ -59,11 +70,49 @@ const MATS: Record<Mat, { e: number; mu: number }> = {
   flipper: { e: 0.55, mu: 0.5 },
   bumper: { e: 0.6, mu: 0.3 },
   plunger: { e: 0.0, mu: 0.3 },
+  ramp: { e: 0.3, mu: 0.12 }, // plastique transparent
 };
 
 export type StaticPart =
-  | { kind: 'box'; c: [number, number, number]; h: [number, number, number]; rotY: number; mat: Mat }
+  | { kind: 'box'; c: [number, number, number]; h: [number, number, number]; rotY: number; q?: Q; mat: Mat }
+  | { kind: 'prism'; pts: [number, number][]; h: number; mat: Mat; id?: string }
   | { kind: 'cyl'; c: [number, number, number]; r: number; hh: number; mat: Mat; id?: string };
+
+export type Q = [number, number, number, number];
+
+/** Quaternion d'un repère dont l'axe x local suit `d` (3D) et l'axe z local reste horizontal. */
+export function quatAlong(dx: number, dy: number, dz: number): Q {
+  const l = Math.hypot(dx, dy, dz);
+  const X = [dx / l, dy / l, dz / l];
+  // Z = X × up (horizontal), Y = Z × X
+  let Z = [-X[2], 0, X[0]];
+  const lz = Math.hypot(Z[0], Z[2]) || 1;
+  Z = [Z[0] / lz, 0, Z[2] / lz];
+  const Y = [Z[1] * X[2] - Z[2] * X[1], Z[2] * X[0] - Z[0] * X[2], Z[0] * X[1] - Z[1] * X[0]];
+  // matrice colonnes [X Y Z] → quaternion
+  const m00 = X[0], m01 = Y[0], m02 = Z[0], m10 = X[1], m11 = Y[1], m12 = Z[1], m20 = X[2], m21 = Y[2], m22 = Z[2];
+  const tr = m00 + m11 + m22;
+  if (tr > 0) {
+    const S = Math.sqrt(tr + 1) * 2;
+    return [(m21 - m12) / S, (m02 - m20) / S, (m10 - m01) / S, 0.25 * S];
+  } else if (m00 > m11 && m00 > m22) {
+    const S = Math.sqrt(1 + m00 - m11 - m22) * 2;
+    return [0.25 * S, (m01 + m10) / S, (m02 + m20) / S, (m21 - m12) / S];
+  } else if (m11 > m22) {
+    const S = Math.sqrt(1 + m11 - m00 - m22) * 2;
+    return [(m01 + m10) / S, 0.25 * S, (m12 + m21) / S, (m02 - m20) / S];
+  }
+  const S = Math.sqrt(1 + m22 - m00 - m11) * 2;
+  return [(m02 + m20) / S, (m12 + m21) / S, 0.25 * S, (m10 - m01) / S];
+}
+
+export interface Target {
+  id: string;
+  collider: import('@dimforge/rapier3d-compat').Collider;
+  x: number;
+  z: number;
+  down: boolean;
+}
 
 export interface Input {
   left: boolean;
@@ -75,7 +124,14 @@ export type SimEvent =
   | { type: 'flip'; side: 'left' | 'right' }
   | { type: 'bumper'; id: string }
   | { type: 'launch'; power: number }
-  | { type: 'drain' };
+  | { type: 'drain' }
+  | { type: 'sling'; side: 'left' | 'right' }
+  | { type: 'target'; id: string }
+  | { type: 'bank' }
+  | { type: 'ramp' }
+  | { type: 'nudge' }
+  | { type: 'warning'; count: number }
+  | { type: 'tilt' };
 
 export interface FlipperState {
   body: import('@dimforge/rapier3d-compat').RigidBody;
@@ -119,6 +175,13 @@ export class Sim {
   staticParts: StaticPart[] = [];
   bumpers = new Map<number, { id: string; x: number; z: number; cooldown: number }>();
   events: SimEvent[] = [];
+  slings = new Map<number, { side: 'left' | 'right'; a: [number, number]; c: [number, number]; cooldown: number }>();
+  targets = new Map<number, Target>();
+  bankResetTimer = -1;
+  ramp_ = { elevated: false, top: false, lastX: 0, lastZ: 0 };
+  tiltLevel = 0;
+  warnings = 0;
+  tilted = false;
   queue: import('@dimforge/rapier3d-compat').EventQueue;
   time = 0;
   drainTimer = -1;
@@ -148,13 +211,56 @@ export class Sim {
     return this.world.createCollider(desc, body);
   }
 
-  private box(cx: number, cy: number, cz: number, hx: number, hy: number, hz: number, rotY: number, mat: Mat, visible = true) {
+  private box(cx: number, cy: number, cz: number, hx: number, hy: number, hz: number, rotY: number, mat: Mat, visible = true, q?: Q) {
     const R = this.R;
-    const d = R.ColliderDesc.cuboid(hx, hy, hz)
-      .setTranslation(cx, cy, cz)
-      .setRotation({ x: 0, y: Math.sin(rotY / 2), z: 0, w: Math.cos(rotY / 2) });
-    this.collider(d, mat);
-    if (visible) this.staticParts.push({ kind: 'box', c: [cx, cy, cz], h: [hx, hy, hz], rotY, mat });
+    const rot = q ? { x: q[0], y: q[1], z: q[2], w: q[3] } : { x: 0, y: Math.sin(rotY / 2), z: 0, w: Math.cos(rotY / 2) };
+    const d = R.ColliderDesc.cuboid(hx, hy, hz).setTranslation(cx, cy, cz).setRotation(rot);
+    const c = this.collider(d, mat);
+    if (visible) this.staticParts.push({ kind: 'box', c: [cx, cy, cz], h: [hx, hy, hz], rotY, q, mat });
+    return c;
+  }
+
+  /** Bloc convexe extrudé depuis un polygone du plateau (slingshots). */
+  private prism(pts: [number, number][], mat: Mat, h = WALL_H, id?: string) {
+    const R = this.R;
+    const v: number[] = [];
+    for (const [x, z] of pts) v.push(x, 0, z, x, h, z);
+    const d = R.ColliderDesc.convexHull(new Float32Array(v))!;
+    if (id) d.setActiveEvents(R.ActiveEvents.COLLISION_EVENTS);
+    const c = this.collider(d, mat);
+    this.staticParts.push({ kind: 'prism', pts, h, mat, id });
+    return c;
+  }
+
+  /**
+   * Rampe : un chemin 3D (x, z, hauteur du sol de rampe). Sol incliné + rails latéraux.
+   * `solidUntil` : nombre de segments du début dont les rails descendent jusqu'au plateau (on ne passe pas dessous).
+   */
+  private ramp(path: [number, number, number][], solidUntil: number) {
+    const hw = RAMP_W / 2, th = 0.002, rail = 0.0015, railH = 0.028;
+    for (let i = 0; i < path.length - 1; i++) {
+      const [x1, z1, y1] = path[i], [x2, z2, y2] = path[i + 1];
+      const dx = x2 - x1, dy = y2 - y1, dz = z2 - z1;
+      const len = Math.hypot(dx, dy, dz);
+      const q = quatAlong(dx, dy, dz);
+      // normale "haut" du segment pour poser le sol sous le chemin
+      const lh = Math.hypot(dx, dz);
+      const up = [(-dx / lh) * (dy / len), lh / len, (-dz / lh) * (dy / len)];
+      const mxp = (x1 + x2) / 2, myp = (y1 + y2) / 2, mzp = (z1 + z2) / 2;
+      this.box(mxp - up[0] * th, myp - up[1] * th, mzp - up[2] * th, len / 2 + 0.003, th, hw + rail * 2, 0, 'ramp', true, q);
+      // rails
+      const lat = [-dz / lh, 0, dx / lh];
+      for (const s of [-1, 1]) {
+        const ox = lat[0] * (hw + rail) * s, oz = lat[2] * (hw + rail) * s;
+        if (i < solidUntil) {
+          const top = Math.max(y1, y2) + railH;
+          const rotY = Math.atan2(-dz, dx);
+          this.box(mxp + ox, top / 2, mzp + oz, lh / 2 + 0.002, top / 2, rail, rotY, 'ramp');
+        } else {
+          this.box(mxp + ox + up[0] * railH / 2, myp + up[1] * railH / 2, mzp + oz + up[2] * railH / 2, len / 2 + 0.002, railH / 2, rail, 0, 'ramp', true, q);
+        }
+      }
+    }
   }
 
   /** Mur entre deux points du plateau (axe du mur). */
@@ -200,13 +306,48 @@ export class Sim {
     // Couloir de lancement
     this.wall(LANE_INNER_X, maxZ, LANE_INNER_X, -0.2);
 
-    // Guides des couloirs intérieurs (inlanes) vers les flippers
+    // Bas de table : couloirs extérieurs (perte), couloirs intérieurs (vers les flippers), slingshots
     const pl = CX - PIVOT_DX, pr = CX + PIVOT_DX;
-    this.wall(minX, 0.29, pl - 0.016, PIVOT_Z - 0.014, 'metal');
-    this.wall(PLAY_MAX_X, 0.29, pr + 0.016, PIVOT_Z - 0.014, 'metal');
-    // Murs de fond sous les guides (fermeture)
-    this.wall(pl - 0.016, PIVOT_Z - 0.014, pl - 0.016, maxZ, 'wall');
-    this.wall(pr + 0.016, PIVOT_Z - 0.014, pr + 0.016, maxZ, 'wall');
+    for (const side of ['left', 'right'] as const) {
+      const X = side === 'left' ? (x: number) => x : mx;
+      // séparation outlane / inlane : poteau caoutchouc + mur jusqu'en bas
+      this.cylinder(X(SEP_X), 0.232, 0.006, 'rubber');
+      this.wall(X(SEP_X), 0.238, X(SEP_X), maxZ);
+      // guide de l'inlane vers la base du flipper, et fermeture dessous
+      this.wall(X(SEP_X), 0.34, X(pl - 0.016), PIVOT_Z - 0.014, 'metal');
+      this.wall(X(pl - 0.016), PIVOT_Z - 0.014, X(pl - 0.016), maxZ, 'wall');
+      // slingshot (le grand côté a → c donne l'impulsion)
+      const pts: [number, number][] = [SLING.a, SLING.b, SLING.c].map(([x, z]) => [X(x), z] as [number, number]);
+      const c = this.prism(pts, 'rubber', WALL_H, `sling-${side}`);
+      this.slings.set(c.handle, { side, a: pts[0], c: pts[2], cooldown: 0 });
+    }
+
+    // Rampe gauche : montée, virage en épingle en haut, retour vers l'inlane gauche
+    const rx1 = -0.145, rx2 = SEP_X + 0.02, rcz = -0.3, rr = (rx1 - rx2) / 2;
+    const path: [number, number, number][] = [
+      [rx1, 0.03, -0.0015],
+      [rx1, -0.06, 0.012],
+      [rx1, -0.2, 0.045],
+      [rx1, rcz, 0.058],
+    ];
+    for (let i = 1; i <= 6; i++) {
+      const t = (i / 6) * Math.PI;
+      path.push([(rx1 + rx2) / 2 + rr * Math.cos(t), rcz - rr * Math.sin(t), 0.058 - 0.002 * (i / 6)]);
+    }
+    path.push([rx2, 0.0, 0.05], [rx2, 0.165, 0.042]);
+    this.ramp(path, 3);
+
+    // Banque de 5 cibles tombantes contre le mur droit
+    for (let i = 0; i < 5; i++) {
+      const z = -0.07 + i * 0.03;
+      const x = PLAY_MAX_X - 0.012;
+      const d = this.R.ColliderDesc.cuboid(0.003, 0.0175, 0.0125)
+        .setTranslation(x, 0.0175, z)
+        .setActiveEvents(this.R.ActiveEvents.COLLISION_EVENTS);
+      const col = this.collider(d, 'wall');
+      const t: Target = { id: `t${i + 1}`, collider: col, x, z, down: false };
+      this.targets.set(col.handle, t);
+    }
 
     // Bumpers
     const bumperPos: [string, number, number][] = [
@@ -257,6 +398,9 @@ export class Sim {
 
   // ---------- État ----------
   resetBall() {
+    this.tilted = false;
+    this.warnings = 0;
+    this.tiltLevel = 0;
     this.placeBall(LANE_X, PLUNGER_REST_Z - PLUNGER_HALF.z - BALL_R - 0.001);
   }
 
@@ -293,7 +437,7 @@ export class Sim {
   step(input: Input) {
     // Flippers : vitesse angulaire bornée, forte accélération, comme une bobine
     for (const f of this.flippers) {
-      const held = f.side === 'left' ? input.left : input.right;
+      const held = !this.tilted && (f.side === 'left' ? input.left : input.right);
       if (held && !f.held) this.events.push({ type: 'flip', side: f.side });
       f.held = held;
       const target = held ? FLIP_UP : FLIP_REST;
@@ -340,15 +484,41 @@ export class Sim {
 
     // Bumpers actifs : impulsion propre au contact
     for (const b of this.bumpers.values()) b.cooldown = Math.max(0, b.cooldown - DT);
+    for (const s of this.slings.values()) s.cooldown = Math.max(0, s.cooldown - DT);
     this.queue.drainCollisionEvents((h1, h2, started) => {
       if (!started) return;
       const other = h1 === this.ballCollider.handle ? h2 : h2 === this.ballCollider.handle ? h1 : -1;
       const b = this.bumpers.get(other);
-      if (!b || b.cooldown > 0) return;
-      b.cooldown = 0.06;
-      this.kickFrom(b.x, b.z, BUMPER_KICK);
-      this.events.push({ type: 'bumper', id: b.id });
+      if (b) {
+        if (b.cooldown > 0 || this.tilted) return;
+        b.cooldown = 0.06;
+        this.kickFrom(b.x, b.z, BUMPER_KICK);
+        this.events.push({ type: 'bumper', id: b.id });
+        return;
+      }
+      const s = this.slings.get(other);
+      if (s) {
+        if (s.cooldown > 0 || this.tilted) return;
+        this.slingKick(s);
+        return;
+      }
+      const t = this.targets.get(other);
+      if (t && !t.down) {
+        t.down = true;
+        t.collider.setEnabled(false);
+        this.events.push({ type: 'target', id: t.id });
+        if ([...this.targets.values()].every((x) => x.down)) {
+          this.events.push({ type: 'bank' });
+          this.bankResetTimer = TARGET_RESET_DELAY;
+        }
+      }
     });
+    if (this.bankResetTimer >= 0) {
+      this.bankResetTimer -= DT;
+      if (this.bankResetTimer < 0) this.resetTargets();
+    }
+    this.trackRamp();
+    this.tiltLevel = Math.max(0, this.tiltLevel - 0.6 * DT);
 
     // Perte de bille / sécurité
     const p = this.ball.translation();
@@ -363,6 +533,68 @@ export class Sim {
     }
 
     this.prevInput = { ...input };
+  }
+
+  /** Slingshot : seulement si la bille touche le grand côté (a → c), impulsion perpendiculaire vers le jeu. */
+  private slingKick(s: { side: 'left' | 'right'; a: [number, number]; c: [number, number]; cooldown: number }) {
+    const p = this.ball.translation();
+    const [ax, az] = s.a, [cx, cz] = s.c;
+    const ex = cx - ax, ez = cz - az;
+    const L = Math.hypot(ex, ez);
+    const t = ((p.x - ax) * ex + (p.z - az) * ez) / (L * L);
+    // normale sortante (vers le centre de la table)
+    let nx = -ez / L, nz = ex / L;
+    if (nx * (CX - ax) + nz * (0.2 - az) < 0) { nx = -nx; nz = -nz; }
+    const dist = (p.x - ax) * nx + (p.z - az) * nz;
+    if (t < 0.12 || t > 0.88 || dist < 0 || dist > BALL_R + 0.006) return;
+    s.cooldown = 0.08;
+    const v = this.ball.linvel();
+    const vn = v.x * nx + v.z * nz;
+    const out = Math.max(SLING_KICK, Math.abs(vn));
+    this.ball.setLinvel({ x: v.x - vn * nx + out * nx, y: v.y, z: v.z - vn * nz + out * nz }, true);
+    this.events.push({ type: 'sling', side: s.side });
+  }
+
+  resetTargets() {
+    const p = this.ball.translation();
+    for (const t of this.targets.values()) {
+      // on ne relève pas une cible sur la bille
+      if (Math.hypot(p.x - t.x, p.z - t.z) < BALL_R + 0.02) { this.bankResetTimer = 0.2; return; }
+    }
+    for (const t of this.targets.values()) { t.down = false; t.collider.setEnabled(true); }
+    this.bankResetTimer = -1;
+  }
+
+  /** Rampe réussie : la bille est montée, a passé l'épingle, et redescend par le retour. */
+  private trackRamp() {
+    const p = this.ball.translation();
+    const r = this.ramp_;
+    if (p.y > BALL_R + 0.03) {
+      r.elevated = true;
+      if (p.z < -0.29) r.top = true;
+      r.lastX = p.x; r.lastZ = p.z;
+    } else if (r.elevated && p.y < BALL_R + 0.012) {
+      if (r.top && r.lastX < SEP_X + 0.04 && r.lastZ > 0.1) this.events.push({ type: 'ramp' });
+      r.elevated = false; r.top = false;
+    }
+  }
+
+  /** Secousse de la table : petite impulsion sur la bille, compteur de tilt avec 2 avertissements. */
+  nudge(dx: number, dz: number) {
+    if (this.tilted) return;
+    const l = Math.hypot(dx, dz) || 1;
+    const v = this.ball.linvel();
+    this.ball.setLinvel({ x: v.x + (dx / l) * NUDGE_DV, y: v.y, z: v.z + (dz / l) * NUDGE_DV }, true);
+    this.events.push({ type: 'nudge' });
+    this.tiltLevel += 1;
+    if (this.tiltLevel > 2.2) {
+      this.warnings++;
+      this.tiltLevel = 0.8;
+      if (this.warnings > 2) {
+        this.tilted = true;
+        this.events.push({ type: 'tilt' });
+      } else this.events.push({ type: 'warning', count: this.warnings });
+    }
   }
 
   kickFrom(x: number, z: number, speed: number) {

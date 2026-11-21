@@ -1,6 +1,6 @@
 # Flipper Test
 
-Bac à sable physique du flipper **Ballottage** : Three.js pour le rendu, Rapier (WebAssembly) pour la physique, pensé pour le téléphone en portrait.
+Maquette grise du flipper **Ballottage** : Three.js pour le rendu, Rapier (WebAssembly) pour la physique, pensé pour le téléphone en portrait.
 
 ## Lancer
 
