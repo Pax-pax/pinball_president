@@ -2,7 +2,7 @@
 import puppeteer from 'puppeteer-core';
 import { pathToFileURL } from 'node:url';
 const file = process.argv[2], out = process.argv[3] || '/tmp/shot';
-const browser = await puppeteer.launch({ executablePath: '/usr/bin/google-chrome', headless: true,
+const browser = await puppeteer.launch({ executablePath: process.env.CHROME_PATH || (process.platform === 'darwin' ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : '/usr/bin/google-chrome'), headless: true,
   args: ['--no-sandbox', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
 const page = await browser.newPage();
 await page.emulate({ viewport: { width: 412, height: 915, deviceScaleFactor: 2, isMobile: true, hasTouch: true },

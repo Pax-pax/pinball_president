@@ -1,7 +1,7 @@
 // Vérifie les contrôles clavier dans le navigateur (profil ordinateur, souris)
 import puppeteer from 'puppeteer-core';
 import { pathToFileURL } from 'node:url';
-const browser = await puppeteer.launch({ executablePath: '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
+const browser = await puppeteer.launch({ executablePath: process.env.CHROME_PATH || (process.platform === 'darwin' ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : '/usr/bin/google-chrome'), headless: true, args: ['--no-sandbox', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
 const page = await browser.newPage();
 await page.setViewport({ width: 1280, height: 800 });
 await page.goto(pathToFileURL(process.argv[2]).href);

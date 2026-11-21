@@ -1,5 +1,5 @@
 {
-  "name": "flipper-test",
+  "name": "pinball_president",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "vite build",
     "sweep": "tsx test/sweep.ts",
-    "stuck": "tsx test/stuck.ts"
+    "stuck": "tsx test/stuck.ts",
+    "browser": "npm run build && node test/shot.mjs dist/index.html /tmp/shot && node test/motion.mjs dist/index.html && node test/keys.mjs dist/index.html"
   },
   "keywords": [],
   "author": "",

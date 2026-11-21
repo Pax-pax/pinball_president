@@ -1,7 +1,7 @@
 // Vérifie de bout en bout qu'une poussée simulée (événements devicemotion) secoue la table dans le navigateur.
 import puppeteer from 'puppeteer-core';
 import { pathToFileURL } from 'node:url';
-const browser = await puppeteer.launch({ executablePath: '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
+const browser = await puppeteer.launch({ executablePath: process.env.CHROME_PATH || (process.platform === 'darwin' ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : '/usr/bin/google-chrome'), headless: true, args: ['--no-sandbox', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
 const page = await browser.newPage();
 await page.goto(pathToFileURL(process.argv[2]).href);
 await page.waitForFunction(() => window.__sim);

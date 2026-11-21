@@ -1,4 +1,4 @@
-# Flipper Test
+# Ballottage (pinball_president)
 
 Maquette grise du flipper **Ballottage** : Three.js pour le rendu, Rapier (WebAssembly) pour la physique, pensé pour le téléphone en portrait. Disposition en éventail inspirée des tables Williams de la fin des années 90 (structure de jeu à six personnages façon Monster Bash), habillée en satire de la présidentielle 2027.
 
@@ -9,6 +9,7 @@ npm install
 npm run dev      # serveur local (ouvrir l'URL réseau sur le téléphone)
 npm test         # tirs de référence de la physique
 npm run sweep    # balayage des tirs depuis chaque flipper
+npm run browser  # captures et contrôles dans Chrome headless
 npm run build    # dist/index.html autonome (un seul fichier)
 ```
 
@@ -19,7 +20,9 @@ Tous les noms, surnoms, slogans et couleurs des six candidats sont dans `src/can
 ## Commandes
 
 - Téléphone : moitié gauche / droite de l'écran = flippers. Maintenir à droite quand la bille est dans le couloir = lanceur. Glisser vite vers le haut = secouer la table (tilt au 3e avertissement).
-- Clavier : Z ou ← (gauche), M ou → (droite), Espace ou ↓ (lanceur), N ou ↑ (secousse).
+- Clavier : ← → ou Maj (flippers), ↓ ou Entrée (lanceur), Espace ou ↑ (secousse avant), Q / D (secousse gauche / droite), R (nouvelle bille).
+
+Voir `CLAUDE.md` pour l'architecture, la physique et la feuille de route.
 
 ## Physique
 
