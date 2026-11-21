@@ -298,10 +298,10 @@ let started = false;
 
 function updateInput() {
   const vals = [...pointers.values()];
-  input.left = vals.includes('left') || keys.has('KeyZ') || keys.has('ShiftLeft') || keys.has('ArrowLeft');
-  input.right = vals.includes('right') || keys.has('KeyM') || keys.has('ShiftRight') || keys.has('ArrowRight');
+  input.left = vals.includes('left') || keys.has('ShiftLeft') || keys.has('ArrowLeft');
+  input.right = vals.includes('right') || keys.has('ShiftRight') || keys.has('ArrowRight');
   // Lanceur : maintenir à droite quand la bille est dans le couloir (ou Espace / flèche bas)
-  input.plunger = vals.includes('right') || keys.has('Space') || keys.has('ArrowDown') || keys.has('Enter');
+  input.plunger = vals.includes('right') || keys.has('ArrowDown') || keys.has('Enter') || keys.has('NumpadEnter');
 }
 
 // ---------- Secousse par l'accéléromètre ----------
@@ -326,9 +326,13 @@ function onMotion(e: DeviceMotionEvent) {
   const [sx, sy] = toScreen(a.x, a.y ?? 0, angle);
   const push = shake.sample(performance.now() / 1000, sx, sy, a.z ?? 0, !!lin, rot);
   if (!push) return;
+  pushTable(push.x, push.y);
+}
+/** Pousser la caisse (repère écran : x vers la droite, y vers le haut). Même effet au clavier et au téléphone. */
+function pushTable(x: number, y: number) {
   const k = NUDGE_FOLLOWS_PUSH ? 1 : -1;
-  // écran : x vers la droite, y vers le haut ; table : x vers la droite, z vers le joueur
-  sim.nudge(k * push.x, -k * push.y);
+  // table : x vers la droite, z vers le joueur
+  sim.nudge(k * x, -k * y);
 }
 async function startMotion() {
   if (motionState !== 'off') return;
@@ -342,6 +346,20 @@ async function startMotion() {
   // pas d'échantillon au bout de 2 s : capteur absent ou bloqué par la page qui nous héberge
   setTimeout(() => { if (motionState === 'waiting') setMotionState('blocked'); }, 2000);
 }
+
+// sur ordinateur (souris, pas d'écran tactile) on affiche l'aide clavier
+function showKeyboardHelp() {
+  if (hud.hint.classList.contains('desktop')) return;
+  hud.hint.innerHTML =
+    '<b>← →</b> ou <b>Maj G / Maj D</b> : flippers<br/>' +
+    '<b>↓</b> ou <b>Entrée</b> (maintenir) : lanceur<br/>' +
+    '<b>Espace</b> ou <b>↑</b> : secouer vers l\'avant<br/>' +
+    '<b>Q</b> / <b>D</b> : secouer à gauche / à droite<br/>' +
+    '<b>R</b> : nouvelle bille<br/>' +
+    '<small>Cliquez d\'abord dans la page pour qu\'elle reçoive le clavier.</small>';
+  hud.hint.classList.add('desktop');
+}
+if (window.matchMedia('(hover: hover) and (pointer: fine)').matches) showKeyboardHelp();
 
 function firstTouch() {
   if (started) return;
@@ -377,10 +395,20 @@ const up = (e: PointerEvent) => { pointers.delete(e.pointerId); starts.delete(e.
 canvas.addEventListener('pointerup', up);
 canvas.addEventListener('pointercancel', up);
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+// Clavier : flèches ou Maj pour les flippers, ↓ ou Entrée pour le lanceur,
+// secousses : Espace ou ↑ (pousser vers l'avant), Q / D (pousser à gauche / à droite), R pour remettre une bille.
+const GAME_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space', 'Enter', 'NumpadEnter', 'ShiftLeft', 'ShiftRight']);
 window.addEventListener('keydown', (e) => {
+  if (GAME_KEYS.has(e.code)) e.preventDefault();
   if (e.repeat) return;
-  if (e.code === 'KeyN' || e.code === 'ArrowUp') sim.nudge(0, -1);
-  keys.add(e.code); firstTouch(); updateInput(); if (e.code === 'Space') e.preventDefault(); });
+  showKeyboardHelp();
+  const k = e.key.toLowerCase();
+  if (e.code === 'Space' || e.code === 'ArrowUp') pushTable(0, 1);
+  else if (k === 'q' || k === 'a') pushTable(-1, 0);
+  else if (k === 'd') pushTable(1, 0);
+  else if (k === 'r') sim.resetBall();
+  keys.add(e.code); firstTouch(); updateInput();
+});
 window.addEventListener('keyup', (e) => { keys.delete(e.code); updateInput(); });
 window.addEventListener('blur', () => { pointers.clear(); keys.clear(); updateInput(); });
 
