@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "tsx test/sim.test.ts",
+    "test": "tsx test/sim.test.ts && tsx test/shake.test.ts",
     "dev": "vite",
     "build": "vite build",
     "sweep": "tsx test/sweep.ts",

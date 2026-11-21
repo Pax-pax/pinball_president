@@ -6,6 +6,7 @@ import {
   flipperHullPoints, StaticPart, Mat, SHOTS, SAUCER, ORBIT_W, PLAY_MAX_X, LANE_HW,
 } from './sim';
 import { CANDIDATS } from './candidates';
+import { ShakeDetector, toScreen } from './shake';
 
 const hud = {
   speed: document.getElementById('speed')!,
@@ -15,6 +16,7 @@ const hud = {
   score: document.getElementById('score')!,
   balls: document.getElementById('balls')!,
   banner: document.getElementById('banner')!,
+  motion: document.getElementById('motion')!,
 };
 
 let R: Awaited<ReturnType<typeof initRapier>>;
@@ -302,9 +304,49 @@ function updateInput() {
   input.plunger = vals.includes('right') || keys.has('Space') || keys.has('ArrowDown') || keys.has('Enter');
 }
 
+// ---------- Secousse par l'accéléromètre ----------
+// Comme sur une vraie machine : on pousse la caisse, la bille part à l'opposé (inertie).
+// Mettre à true pour que la bille parte dans le sens de la poussée.
+const NUDGE_FOLLOWS_PUSH = false;
+const shake = new ShakeDetector();
+let motionState: 'off' | 'waiting' | 'on' | 'blocked' = 'off';
+function setMotionState(st: typeof motionState) {
+  motionState = st;
+  hud.motion.textContent =
+    st === 'on' ? 'secousse téléphone : active' : st === 'blocked' ? 'secousse téléphone : indisponible ici' : st === 'waiting' ? 'secousse téléphone : …' : '';
+}
+function onMotion(e: DeviceMotionEvent) {
+  const lin = e.acceleration && e.acceleration.x !== null ? e.acceleration : null;
+  const a = lin ?? e.accelerationIncludingGravity;
+  if (!a || a.x === null || a.y === null) return;
+  if (motionState !== 'on') setMotionState('on');
+  const r = e.rotationRate;
+  const rot = r ? Math.hypot(r.alpha ?? 0, r.beta ?? 0, r.gamma ?? 0) : 0;
+  const angle = (screen.orientation?.angle ?? 0) as number;
+  const [sx, sy] = toScreen(a.x, a.y ?? 0, angle);
+  const push = shake.sample(performance.now() / 1000, sx, sy, a.z ?? 0, !!lin, rot);
+  if (!push) return;
+  const k = NUDGE_FOLLOWS_PUSH ? 1 : -1;
+  // écran : x vers la droite, y vers le haut ; table : x vers la droite, z vers le joueur
+  sim.nudge(k * push.x, -k * push.y);
+}
+async function startMotion() {
+  if (motionState !== 'off') return;
+  if (typeof DeviceMotionEvent === 'undefined') { setMotionState('blocked'); return; }
+  setMotionState('waiting');
+  try {
+    const req = (DeviceMotionEvent as any).requestPermission;
+    if (typeof req === 'function' && (await req()) !== 'granted') { setMotionState('blocked'); return; }
+  } catch { setMotionState('blocked'); return; }
+  window.addEventListener('devicemotion', onMotion);
+  // pas d'échantillon au bout de 2 s : capteur absent ou bloqué par la page qui nous héberge
+  setTimeout(() => { if (motionState === 'waiting') setMotionState('blocked'); }, 2000);
+}
+
 function firstTouch() {
   if (started) return;
   started = true;
+  void startMotion();
   hud.hint.classList.add('gone');
   const el = document.documentElement as any;
   try { el.requestFullscreen?.({ navigationUI: 'hide' })?.catch?.(() => {}); } catch {}
