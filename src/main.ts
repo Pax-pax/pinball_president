@@ -3,8 +3,9 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import { ConvexGeometry } from 'three/examples/jsm/geometries/ConvexGeometry.js';
 import {
   Sim, initRapier, Input, DT, TILT, TABLE, BALL_R, CX, PLUNGER_HALF, PLUNGER_MAX_PULL,
-  flipperHullPoints, StaticPart, Mat,
+  flipperHullPoints, StaticPart, Mat, SHOTS, SAUCER, ORBIT_W, PLAY_MAX_X, LANE_HW,
 } from './sim';
+import { CANDIDATS } from './candidates';
 
 const hud = {
   speed: document.getElementById('speed')!,
@@ -68,21 +69,54 @@ const matFor = (m: Mat) =>
     depthWrite: m !== 'ramp',
   }));
 
-// Plateau : maquette grise avec une grille de 5 cm (pour juger les distances à l'œil)
+// Plateau : maquette grise, grille de 5 cm, et inserts fléchés au nom des candidats devant chaque tir
 function floorTexture() {
   const c = document.createElement('canvas');
-  c.width = 512; c.height = 1074;
+  c.width = 1024; c.height = 2148;
   const g = c.getContext('2d')!;
-  g.fillStyle = '#2b3a55'; g.fillRect(0, 0, c.width, c.height);
-  g.strokeStyle = 'rgba(255,255,255,0.08)'; g.lineWidth = 2;
   const px = c.width / (TABLE.maxX - TABLE.minX);
+  const X = (x: number) => (x - TABLE.minX) * px, Z = (z: number) => (z - TABLE.minZ) * px;
+  g.fillStyle = '#2b3a55'; g.fillRect(0, 0, c.width, c.height);
+  g.strokeStyle = 'rgba(255,255,255,0.07)'; g.lineWidth = 2;
   for (let x = 0; x <= c.width; x += 0.05 * px) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, c.height); g.stroke(); }
   for (let y = 0; y <= c.height; y += 0.05 * px) { g.beginPath(); g.moveTo(0, y); g.lineTo(c.width, y); g.stroke(); }
-  g.fillStyle = 'rgba(255,255,255,0.18)';
-  g.font = 'bold 44px system-ui, sans-serif'; g.textAlign = 'center';
-  g.fillText('BALLOTTAGE', (CX - TABLE.minX) * px, c.height * 0.55);
-  g.font = '24px system-ui, sans-serif';
-  g.fillText('maquette grise', (CX - TABLE.minX) * px, c.height * 0.55 + 36);
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillStyle = 'rgba(255,255,255,0.16)';
+  g.font = 'bold 80px system-ui, sans-serif';
+  g.fillText('BALLOTTAGE', X(CX), Z(0.2));
+  g.font = '40px system-ui, sans-serif';
+  g.fillText('maquette grise', X(CX), Z(0.2) + 60);
+
+  // flèche + nom, éventuellement tournés pour les couloirs étroits
+  const insert = (x: number, z: number, label: string, color: string, rot = 0, size = 26) => {
+    g.save();
+    g.translate(X(x), Z(z));
+    g.rotate(rot);
+    g.fillStyle = color;
+    g.globalAlpha = 0.9;
+    g.beginPath(); g.moveTo(0, -34); g.lineTo(16, -8); g.lineTo(-16, -8); g.closePath(); g.fill();
+    g.font = `bold ${size}px system-ui, sans-serif`;
+    g.fillText(label.toUpperCase(), 0, 14);
+    g.restore();
+  };
+  const C = CANDIDATS;
+  insert(SAUCER.x, SAUCER.z + 0.05, C.creature.nom, C.creature.couleur, 0, 18);
+  insert(SHOTS.rampL, 0.06, C.union.nom, C.union.couleur);
+  insert(SHOTS.scoop, -0.02, 'Scoop', '#ffffff', 0, 20);
+  insert(SHOTS.gate, -0.02, C.recompose.nom, C.recompose.couleur, 0, 16);
+  insert(SHOTS.spinner, -0.02, 'Manif', '#ffffff', 0, 20);
+  insert(SHOTS.rampR, 0.06, C.union.nom, C.union.couleur);
+  insert(TABLE.minX + ORBIT_W / 2 + 0.002, -0.1, C.tribun.nom, C.tribun.couleur, -Math.PI / 2, 18);
+  insert(PLAY_MAX_X - ORBIT_W / 2 - 0.002, -0.1, C.tribun.nom, C.tribun.couleur, -Math.PI / 2, 18);
+  insert(0.175, 0.145, C.revenant.nom, C.revenant.couleur, -Math.PI / 2, 18);
+  insert(-0.045, -0.385, C.heritiere.nom, C.heritiere.couleur, 0, 20);
+  // trous
+  g.globalAlpha = 1;
+  for (const h of sim.holes) {
+    g.fillStyle = '#05060a';
+    g.beginPath(); g.arc(X(h.x), Z(h.z), 0.0155 * px, 0, Math.PI * 2); g.fill();
+    g.strokeStyle = '#c9ccd6'; g.lineWidth = 5; g.stroke();
+  }
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;
   t.anisotropy = 8;
@@ -148,13 +182,28 @@ const targetMeshes = new Map<string, THREE.Mesh>();
 for (const t of sim.targets.values()) {
   const m = new THREE.Mesh(
     new THREE.BoxGeometry(0.006, 0.035, 0.025),
-    new THREE.MeshStandardMaterial({ color: 0xffd34d, roughness: 0.4 })
+    new THREE.MeshStandardMaterial({ color: t.group === 'retour' ? CANDIDATS.revenant.couleur : 0xffd34d, roughness: 0.4 })
   );
   m.position.set(t.x, 0.0175, t.z);
   m.castShadow = true;
   table.add(m);
   targetMeshes.set(t.id, m);
 }
+
+// Cible-porte du Recomposé et spinner de la boucle centrale
+const gateMesh = new THREE.Mesh(
+  new THREE.BoxGeometry(LANE_HW * 2 + 0.004, 0.035, 0.006),
+  new THREE.MeshStandardMaterial({ color: CANDIDATS.recompose.couleur, roughness: 0.4, emissive: CANDIDATS.recompose.couleur, emissiveIntensity: 0 })
+);
+gateMesh.position.set(SHOTS.gate, 0.0175, -0.078);
+gateMesh.castShadow = true;
+table.add(gateMesh);
+const spinner = new THREE.Group();
+spinner.position.set(SHOTS.spinner, 0.026, -0.1);
+const plate = new THREE.Mesh(new THREE.BoxGeometry(LANE_HW * 2, 0.022, 0.0015), matFor('metal'));
+plate.position.y = -0.011;
+spinner.add(plate);
+table.add(spinner);
 
 // Flippers
 const flipperMeshes = sim.flippers.map((f) => {
@@ -331,9 +380,15 @@ function tick(now: number) {
     else if (e.type === 'launch') buzz(Math.round(20 + 30 * e.power));
     else if (e.type === 'drain') { buzz(60); ballsLost++; }
     else if (e.type === 'sling') { buzz(14); score += 10; flash.set(`sling-${e.side}`, 0.1); }
-    else if (e.type === 'target') { buzz(16); score += 250; }
-    else if (e.type === 'bank') { score += 2000; banner('Cibles : banque complète +2 000'); }
-    else if (e.type === 'ramp') { buzz(30); score += 1000; banner('Rampe ! +1 000'); }
+    else if (e.type === 'target') { buzz(16); score += e.group === 'retour' ? 300 : 250; }
+    else if (e.type === 'bank') { score += 2000; banner('Sondages : banque complète +2 000'); }
+    else if (e.type === 'ramp') { buzz(30); score += 1000; banner(`Rampe ${e.side === 'left' ? 'gauche' : 'droite'} +1 000`); }
+    else if (e.type === 'orbit') { score += 500; }
+    else if (e.type === 'spinner') { score += 10 * e.spins; }
+    else if (e.type === 'hole') { buzz(40); score += 500; if (e.id === 'saucer') banner(CANDIDATS.creature.nom); if (e.id === 'recompose') banner(CANDIDATS.recompose.mode); }
+    else if (e.type === 'kickout') buzz(30);
+    else if (e.type === 'gate') { buzz(16); score += 50; banner(`Éléments de langage ${e.hits}/7`); }
+    else if (e.type === 'gateOpen') { banner(`${CANDIDATS.recompose.nom} : couloir ouvert`); }
     else if (e.type === 'nudge') buzz(25);
     else if (e.type === 'warning') { buzz(120); banner(`ATTENTION ${e.count}/2`, true); }
     else if (e.type === 'tilt') { buzz(400); banner('TILT', true); }
@@ -341,7 +396,9 @@ function tick(now: number) {
 
   // Synchronisation des meshes
   const p = sim.ballPos();
-  ball.position.set(p.x, p.y, p.z);
+  ball.position.set(p.x, p.y - (sim.captured ? 0.008 : 0), p.z);
+  gateMesh.position.y += ((sim.gateOpen ? -0.02 : 0.0175) - gateMesh.position.y) * Math.min(1, dt * 20);
+  spinner.rotation.x = sim.spinnerAngle;
   const q = sim.ball.rotation();
   ball.quaternion.set(q.x, q.y, q.z, q.w);
   sim.flippers.forEach((f, i) => {

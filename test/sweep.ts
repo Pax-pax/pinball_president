@@ -13,7 +13,7 @@ for (const side of ['left', 'right'] as const) {
     for (let i = 0; i < 480 * 2.5; i++) s.step(hold);
     s.takeEvents();
     let fired = false; const ev = new Set<string>(); let t0 = -1;
-    const frac = 0.25 + k * 0.05;
+    const frac = 0.3 + k * 0.045;
     for (let i = 0; i < 480 * 3; i++) {
       const p = s.ballPos(); const d = Math.hypot(p.x - px, p.z - PIVOT_Z);
       if (!fired && i > 40 && d > 0.075 * frac) { fired = true; t0 = i; }
@@ -21,7 +21,8 @@ for (const side of ['left', 'right'] as const) {
       s.step({ ...NONE, [side]: on });
       for (const e of s.takeEvents()) if (!['flip'].includes(e.type)) ev.add(e.type === 'target' ? 'cible' : e.type);
     }
-    res.push(`${frac.toFixed(2)}:${[...ev].join('+') || '-'}`);
+    const fp = s.ballPos();
+    res.push(`${frac.toFixed(2)}:${[...ev].join('+') || '-'}${ev.size ? '' : `@(${fp.x.toFixed(2)},${fp.z.toFixed(2)},v${s.ballSpeed().toFixed(2)})`}`);
   }
   console.log(side, res.join('  '));
 }

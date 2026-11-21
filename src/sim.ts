@@ -16,7 +16,7 @@ export const DT = 1 / 480; // pas fixe
 export const TABLE = { minX: -0.255, maxX: 0.255, minZ: -0.535, maxZ: 0.535 };
 export const WT = 0.008; // épaisseur des murs
 export const WALL_H = 0.05;
-export const GLASS_Y = 0.085; // vitre : assez haute pour laisser passer la bille sur la rampe
+export const GLASS_Y = 0.105; // vitre : assez haute pour laisser passer la bille sur la rampe
 
 // Couloir de lancement à droite
 export const LANE_INNER_X = TABLE.maxX - 0.03 - WT / 2; // axe du mur intérieur
@@ -58,6 +58,14 @@ export const RAMP_W = 0.036; // largeur utile de la rampe
 export const mx = (x: number) => 2 * CX - x;
 // Géométrie du bas de table (côté gauche, le droit est le miroir)
 export const SEP_X = -0.22; // séparation couloir extérieur / intérieur
+export const ORBIT_W = 0.038; // largeur utile des orbites
+export const ORBIT_MOUTH_Z = 0.02; // bas des murs intérieurs d'orbite
+export const LANE_HW = 0.016; // demi-largeur utile des couloirs de tir
+export const RAMP_TOP = 0.064; // hauteur du sol des rampes en haut
+/** Abscisses des tirs au fond de l'éventail, de gauche à droite. */
+export const SHOTS = { rampL: -0.15, scoop: -0.093, gate: -0.04, spinner: 0.012, rampR: 0.068 } as const;
+export const SAUCER = { x: -0.185, z: 0.08 } as const;
+export const GATE_HITS = 7; // éléments de langage pour ouvrir le couloir du Recomposé
 export const SLING = { a: [-0.18, 0.205], b: [-0.18, 0.355], c: [-0.137, 0.384] } as const;
 
 export type Mat = 'wall' | 'metal' | 'rubber' | 'floor' | 'glass' | 'flipper' | 'bumper' | 'plunger' | 'ramp';
@@ -108,10 +116,24 @@ export function quatAlong(dx: number, dy: number, dz: number): Q {
 
 export interface Target {
   id: string;
+  group: 'sondage' | 'retour';
   collider: import('@dimforge/rapier3d-compat').Collider;
   x: number;
   z: number;
+  nx: number; // sens de la face (+1 = vers la droite)
+  drops: boolean;
   down: boolean;
+}
+
+export interface Hole {
+  id: 'scoop' | 'recompose' | 'saucer';
+  x: number;
+  z: number;
+  r: number; // rayon de capture
+  maxSpeed: number; // au-delà, la bille passe par-dessus
+  kick: [number, number];
+  speed: number;
+  hold: number;
 }
 
 export interface Input {
@@ -126,9 +148,15 @@ export type SimEvent =
   | { type: 'launch'; power: number }
   | { type: 'drain' }
   | { type: 'sling'; side: 'left' | 'right' }
-  | { type: 'target'; id: string }
+  | { type: 'target'; id: string; group: 'sondage' | 'retour' }
   | { type: 'bank' }
-  | { type: 'ramp' }
+  | { type: 'ramp'; side: 'left' | 'right' }
+  | { type: 'hole'; id: Hole['id'] }
+  | { type: 'kickout'; id: Hole['id'] }
+  | { type: 'gate'; hits: number }
+  | { type: 'gateOpen' }
+  | { type: 'spinner'; spins: number }
+  | { type: 'orbit'; dir: 'left' | 'right' }
   | { type: 'nudge' }
   | { type: 'warning'; count: number }
   | { type: 'tilt' };
@@ -178,6 +206,16 @@ export class Sim {
   slings = new Map<number, { side: 'left' | 'right'; a: [number, number]; c: [number, number]; cooldown: number }>();
   targets = new Map<number, Target>();
   bankResetTimer = -1;
+  holes: Hole[] = [];
+  orbitFlag = false;
+  captured: { hole: Hole; t: number } | null = null;
+  holeCooldown = 0;
+  gate!: import('@dimforge/rapier3d-compat').Collider;
+  gateHits = 0;
+  gateOpen = false;
+  spinnerSensor!: import('@dimforge/rapier3d-compat').Collider;
+  spinnerAngle = 0;
+  spinnerVel = 0;
   ramp_ = { elevated: false, top: false, lastX: 0, lastZ: 0 };
   tiltLevel = 0;
   warnings = 0;
@@ -281,6 +319,24 @@ export class Sim {
     return c;
   }
 
+  private addHole(id: Hole['id'], x: number, z: number, r: number, maxSpeed: number, kick: [number, number], speed: number, hold: number) {
+    const l = Math.hypot(kick[0], kick[1]);
+    this.holes.push({ id, x, z, r, maxSpeed, kick: [kick[0] / l, kick[1] / l], speed, hold });
+  }
+
+  private addTarget(id: string, group: Target['group'], x: number, z: number, nx: number, drops: boolean) {
+    const d = this.R.ColliderDesc.cuboid(0.003, 0.0175, 0.0125)
+      .setTranslation(x, 0.0175, z)
+      .setActiveEvents(this.R.ActiveEvents.COLLISION_EVENTS);
+    const col = this.collider(d, drops ? 'wall' : 'rubber');
+    this.targets.set(col.handle, { id, group, collider: col, x, z, nx, drops, down: false });
+  }
+
+  setGateOpen(open: boolean) {
+    this.gateOpen = open;
+    this.gate.setEnabled(!open);
+  }
+
   private buildTable() {
     const R = this.R;
     const { minX, maxX, minZ, maxZ } = TABLE;
@@ -322,38 +378,79 @@ export class Sim {
       this.slings.set(c.handle, { side, a: pts[0], c: pts[2], cooldown: 0 });
     }
 
-    // Rampe gauche : montée, virage en épingle en haut, retour vers l'inlane gauche
-    const rx1 = -0.145, rx2 = SEP_X + 0.02, rcz = -0.3, rr = (rx1 - rx2) / 2;
-    const path: [number, number, number][] = [
-      [rx1, 0.03, -0.0015],
-      [rx1, -0.06, 0.012],
-      [rx1, -0.2, 0.045],
-      [rx1, rcz, 0.058],
-    ];
-    for (let i = 1; i <= 6; i++) {
-      const t = (i / 6) * Math.PI;
-      path.push([(rx1 + rx2) / 2 + rr * Math.cos(t), rcz - rr * Math.sin(t), 0.058 - 0.002 * (i / 6)]);
+    // ---- Disposition en éventail (inspirée des tables Williams fin 90) ----
+    // Orbites : couloirs le long des murs, reliés par l'arche. Un déflecteur en bas renvoie la bille vers le jeu.
+    for (const side of ['left', 'right'] as const) {
+      const wallX = side === 'left' ? minX : PLAY_MAX_X;
+      const s = side === 'left' ? 1 : -1;
+      const inner = wallX + s * (ORBIT_W + WT / 2);
+      this.wall(inner, ORBIT_MOUTH_Z, inner, -0.25, 'metal');
+      this.wall(wallX, ORBIT_MOUTH_Z + 0.02, wallX + s * (ORBIT_W + 0.002), ORBIT_MOUTH_Z + 0.08, 'metal');
     }
-    path.push([rx2, 0.0, 0.05], [rx2, 0.165, 0.042]);
-    this.ramp(path, 3);
 
-    // Banque de 5 cibles tombantes contre le mur droit
-    for (let i = 0; i < 5; i++) {
-      const z = -0.07 + i * 0.03;
-      const x = PLAY_MAX_X - 0.012;
-      const d = this.R.ColliderDesc.cuboid(0.003, 0.0175, 0.0125)
-        .setTranslation(x, 0.0175, z)
+    // Couloirs de tir au fond de l'éventail (scoop, porte du Recomposé, boucle du spinner)
+    const lane = (x: number, z1: number, z2: number, closed: boolean) => {
+      this.wall(x - LANE_HW - WT / 2, z1, x - LANE_HW - WT / 2, z2);
+      this.wall(x + LANE_HW + WT / 2, z1, x + LANE_HW + WT / 2, z2);
+      if (closed) this.wall(x - LANE_HW - WT / 2, z2, x + LANE_HW + WT / 2, z2);
+    };
+    lane(SHOTS.scoop, -0.06, -0.135, true);
+    lane(SHOTS.gate, -0.075, -0.155, true);
+    lane(SHOTS.spinner, -0.075, -0.2, false);
+
+    // Trous : scoop (au fond du couloir), porte du Recomposé, soucoupe (à gauche)
+    this.addHole('scoop', SHOTS.scoop, -0.118, 0.014, 99, [0.05, 1], 1.6, 0.9);
+    this.addHole('recompose', SHOTS.gate, -0.138, 0.014, 99, [0.0, 1], 1.4, 0.9);
+    this.addHole('saucer', SAUCER.x, SAUCER.z, 0.012, 0.9, [0.55, 0.83], 1.3, 0.9);
+
+    // Cible qui ferme le couloir du Recomposé (s'efface quand la porte est ouverte)
+    {
+      const d = this.R.ColliderDesc.cuboid(LANE_HW + 0.002, 0.0175, 0.003)
+        .setTranslation(SHOTS.gate, 0.0175, -0.078)
         .setActiveEvents(this.R.ActiveEvents.COLLISION_EVENTS);
-      const col = this.collider(d, 'wall');
-      const t: Target = { id: `t${i + 1}`, collider: col, x, z, down: false };
-      this.targets.set(col.handle, t);
+      this.gate = this.collider(d, 'wall');
     }
 
-    // Bumpers
+    // Spinner : capteur traversé par la bille dans la boucle centrale
+    {
+      const d = this.R.ColliderDesc.cuboid(LANE_HW, 0.02, 0.002)
+        .setTranslation(SHOTS.spinner, 0.02, -0.1)
+        .setSensor(true)
+        .setActiveEvents(this.R.ActiveEvents.COLLISION_EVENTS);
+      this.spinnerSensor = this.collider(d, 'wall');
+    }
+
+    // Rampes gauche et droite : montée, épingle en haut, retour au-dessus de l'orbite vers l'inlane du même côté
+    for (const side of ['left', 'right'] as const) {
+      const xUp = side === 'left' ? SHOTS.rampL : SHOTS.rampR;
+      const xRet = side === 'left' ? minX + ORBIT_W / 2 + 0.002 : PLAY_MAX_X - ORBIT_W / 2 - 0.002;
+      const xIn = side === 'left' ? SEP_X + 0.02 : mx(SEP_X + 0.02);
+      const rcz = -0.3, rr = (xRet - xUp) / 2, ccx = (xUp + xRet) / 2;
+      const path: [number, number, number][] = [
+        [xUp, 0.0, -0.0015],
+        [xUp, -0.08, 0.016],
+        [xUp, -0.2, 0.046],
+        [xUp, rcz, RAMP_TOP],
+      ];
+      for (let i = 1; i <= 7; i++) {
+        const t = (i / 7) * Math.PI;
+        path.push([ccx - rr * Math.cos(t), rcz - Math.abs(rr) * Math.sin(t), RAMP_TOP]);
+      }
+      path.push([xRet, 0.1, RAMP_TOP - 0.004], [xIn, 0.165, RAMP_TOP - 0.012]);
+      this.ramp(path, 3);
+    }
+
+    // Cibles : 3 sondages tombants contre le mur gauche, 3 cibles fixes R-E-T-O-U-R contre le mur droit
+    for (let i = 0; i < 3; i++) {
+      this.addTarget(`sondage${i + 1}`, 'sondage', minX + 0.012, 0.125 + i * 0.03, 1, true);
+      this.addTarget(`retour${i + 1}`, 'retour', PLAY_MAX_X - 0.006, 0.115 + i * 0.03, -1, false);
+    }
+
+    // Bumpers en haut, alimentés par la boucle centrale et les orbites trop molles
     const bumperPos: [string, number, number][] = [
-      ['b1', CX - 0.065, -0.22],
-      ['b2', CX + 0.065, -0.22],
-      ['b3', CX, -0.13],
+      ['b1', -0.085, -0.29],
+      ['b2', -0.005, -0.315],
+      ['b3', -0.045, -0.235],
     ];
     for (const [id, x, z] of bumperPos) {
       const c = this.cylinder(x, z, BUMPER_R, 'bumper', id);
@@ -409,6 +506,7 @@ export class Sim {
     this.ball.setLinvel({ x: vx, y: 0, z: vz }, true);
     this.ball.setAngvel({ x: 0, y: 0, z: 0 }, true);
     this.drainTimer = -1;
+    this.captured = null;
   }
 
   ballPos() {
@@ -502,22 +600,50 @@ export class Sim {
         this.slingKick(s);
         return;
       }
+      if (other === this.gate.handle && !this.gateOpen) {
+        this.gateHits++;
+        this.events.push({ type: 'gate', hits: this.gateHits });
+        if (this.gateHits >= GATE_HITS) { this.setGateOpen(true); this.events.push({ type: 'gateOpen' }); }
+        return;
+      }
+      if (other === this.spinnerSensor.handle) {
+        const v = this.ball.linvel();
+        const speed = Math.hypot(v.x, v.z);
+        const spins = Math.max(1, Math.round(speed * 5));
+        this.spinnerVel = Math.sign(-v.z || 1) * speed * 60;
+        this.events.push({ type: 'spinner', spins });
+        return;
+      }
       const t = this.targets.get(other);
       if (t && !t.down) {
-        t.down = true;
-        t.collider.setEnabled(false);
-        this.events.push({ type: 'target', id: t.id });
-        if ([...this.targets.values()].every((x) => x.down)) {
-          this.events.push({ type: 'bank' });
-          this.bankResetTimer = TARGET_RESET_DELAY;
+        this.events.push({ type: 'target', id: t.id, group: t.group });
+        if (t.drops) {
+          t.down = true;
+          t.collider.setEnabled(false);
+          const bank = [...this.targets.values()].filter((x) => x.group === t.group);
+          if (bank.every((x) => x.down)) {
+            this.events.push({ type: 'bank' });
+            this.bankResetTimer = TARGET_RESET_DELAY;
+          }
         }
       }
     });
+    this.updateHoles();
+    this.spinnerAngle += this.spinnerVel * DT;
+    this.spinnerVel *= Math.exp(-1.5 * DT);
     if (this.bankResetTimer >= 0) {
       this.bankResetTimer -= DT;
       if (this.bankResetTimer < 0) this.resetTargets();
     }
     this.trackRamp();
+    // Orbite : la bille passe sous l'arche, tout en haut de la table
+    {
+      const p = this.ball.translation();
+      if (!this.orbitFlag && p.z < -0.47 && p.y < BALL_R + 0.01) {
+        this.orbitFlag = true;
+        this.events.push({ type: 'orbit', dir: this.ball.linvel().x < 0 ? 'left' : 'right' });
+      } else if (this.orbitFlag && p.z > -0.3) this.orbitFlag = false;
+    }
     this.tiltLevel = Math.max(0, this.tiltLevel - 0.6 * DT);
 
     // Perte de bille / sécurité
@@ -555,13 +681,48 @@ export class Sim {
     this.events.push({ type: 'sling', side: s.side });
   }
 
+  /** Trous : capture si la bille passe au centre assez lentement, maintien, puis éjection. */
+  private updateHoles() {
+    this.holeCooldown = Math.max(0, this.holeCooldown - DT);
+    if (this.captured) {
+      const c = this.captured;
+      c.t -= DT;
+      if (c.t <= 0) {
+        const { hole } = c;
+        this.ball.setTranslation({ x: hole.x + hole.kick[0] * 0.004, y: BALL_R + 0.0005, z: hole.z + hole.kick[1] * 0.004 }, true);
+        this.ball.setLinvel({ x: hole.kick[0] * hole.speed, y: 0, z: hole.kick[1] * hole.speed }, true);
+        this.events.push({ type: 'kickout', id: hole.id });
+        this.captured = null;
+        this.holeCooldown = 0.35;
+      } else {
+        this.ball.setTranslation({ x: c.hole.x, y: BALL_R, z: c.hole.z }, true);
+        this.ball.setLinvel({ x: 0, y: 0, z: 0 }, true);
+        this.ball.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      }
+      return;
+    }
+    if (this.holeCooldown > 0) return;
+    const p = this.ball.translation();
+    if (p.y > BALL_R + 0.01) return;
+    const v = this.ball.linvel();
+    const sp = Math.hypot(v.x, v.z);
+    for (const h of this.holes) {
+      if (Math.hypot(p.x - h.x, p.z - h.z) < h.r && sp < h.maxSpeed) {
+        this.captured = { hole: h, t: h.hold };
+        this.events.push({ type: 'hole', id: h.id });
+        return;
+      }
+    }
+  }
+
   resetTargets() {
     const p = this.ball.translation();
     for (const t of this.targets.values()) {
+      if (!t.drops) continue;
       // on ne relève pas une cible sur la bille
       if (Math.hypot(p.x - t.x, p.z - t.z) < BALL_R + 0.02) { this.bankResetTimer = 0.2; return; }
     }
-    for (const t of this.targets.values()) { t.down = false; t.collider.setEnabled(true); }
+    for (const t of this.targets.values()) if (t.drops) { t.down = false; t.collider.setEnabled(true); }
     this.bankResetTimer = -1;
   }
 
@@ -574,7 +735,7 @@ export class Sim {
       if (p.z < -0.29) r.top = true;
       r.lastX = p.x; r.lastZ = p.z;
     } else if (r.elevated && p.y < BALL_R + 0.012) {
-      if (r.top && r.lastX < SEP_X + 0.04 && r.lastZ > 0.1) this.events.push({ type: 'ramp' });
+      if (r.top && r.lastZ > 0.08) this.events.push({ type: 'ramp', side: r.lastX < CX ? 'left' : 'right' });
       r.elevated = false; r.top = false;
     }
   }

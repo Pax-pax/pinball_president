@@ -1,7 +1,8 @@
 // Tirs de référence : chaque réglage physique doit garder ces comportements.
 // Lancer : npm test
 import {
-  Sim, initRapier, Input, CX, PIVOT_DX, PIVOT_Z, FLIP_LEN, FLIP_REST, BALL_R, LANE_INNER_X, TABLE, GLASS_Y,
+  Sim, initRapier, Input, SimEvent, CX, PIVOT_DX, PIVOT_Z, FLIP_LEN, BALL_R, LANE_INNER_X, TABLE, GLASS_Y,
+  SHOTS, SAUCER, PLAY_MAX_X, ORBIT_W,
 } from '../src/sim';
 
 const NONE: Input = { left: false, right: false, plunger: false };
@@ -106,7 +107,7 @@ const cradle = (s: Sim) => {
 // 8. Bumper : renvoie la bille avec au moins la vitesse de kick
 {
   const s = fresh();
-  s.placeBall(CX, -0.05, 0, -1.0);
+  s.placeBall(-0.045, -0.175, 0, -1.0);
   let hit = false, v = 0;
   run(s, 0.5, NONE, () => {
     for (const e of s.takeEvents()) if (e.type === 'bumper') { hit = true; v = s.ballSpeed(); }
@@ -120,20 +121,22 @@ const collect = (s: Sim, seconds: number, input: Input = NONE) => {
   return ev;
 };
 
-// 9. Rampe : tir franc dans l'entrée → la bille monte, passe l'épingle et revient par l'inlane gauche
-{
+// 9. Rampes : tir franc dans chaque entrée → la bille monte, passe l'épingle et revient par l'inlane du même côté
+for (const [side, x] of [['left', SHOTS.rampL], ['right', SHOTS.rampR]] as const) {
   const s = fresh();
-  s.placeBall(-0.145, 0.12, 0, -2.4);
-  const ev = collect(s, 2.5);
-  check('rampe réussie à 2,4 m/s', ev.includes('ramp'), `événements: ${[...new Set(ev)].join(', ')}`);
+  s.placeBall(x, 0.12, 0, -2.6);
+  let ev: SimEvent[] = [];
+  run(s, 3, NONE, () => { ev.push(...s.takeEvents()); });
+  const ok = ev.some((e) => e.type === 'ramp' && e.side === side);
+  check(`rampe ${side === 'left' ? 'gauche' : 'droite'} à 2,6 m/s`, ok, `événements: ${[...new Set(ev.map((e) => e.type))].join(', ')}`);
 }
 
 // 10. Rampe : tir trop mou → la bille redescend, pas de rampe comptée, pas coincée
 {
   const s = fresh();
-  s.placeBall(-0.145, 0.12, 0, -1.0);
+  s.placeBall(SHOTS.rampL, 0.12, 0, -1.2);
   const ev = collect(s, 2.5);
-  check('rampe ratée à 1 m/s', !ev.includes('ramp') && s.ballPos().y < BALL_R + 0.005, `y=${s.ballPos().y.toFixed(3)}`);
+  check('rampe ratée à 1,2 m/s', !ev.includes('ramp') && s.ballPos().y < BALL_R + 0.005, `y=${s.ballPos().y.toFixed(3)}`);
 }
 
 // 11. Slingshot : bille qui roule sur le grand côté → impulsion
@@ -144,25 +147,26 @@ const collect = (s: Sim, seconds: number, input: Input = NONE) => {
   check('slingshot gauche', ev.includes('sling'), `événements: ${[...new Set(ev)].join(', ')}`);
 }
 
-// 12. Cibles tombantes : 5 tirs → banque complète, puis remontée
+// 12. Sondages : 3 cibles tombantes → banque complète, puis remontée. RETOUR : cibles fixes.
 {
   const s = fresh();
-  const ev: string[] = [];
+  const ev: SimEvent[] = [];
   for (const t of s.targets.values()) {
-    s.placeBall(t.x - 0.08, t.z, 1.5, 0);
-    ev.push(...collect(s, 0.35));
+    s.placeBall(t.x + t.nx * 0.06, t.z, -t.nx * 1.2, 0);
+    run(s, 0.3, NONE, () => ev.push(...s.takeEvents()));
   }
-  const n = ev.filter((e) => e === 'target').length;
+  const sond = ev.filter((e) => e.type === 'target' && e.group === 'sondage').length;
+  const ret = ev.filter((e) => e.type === 'target' && e.group === 'retour').length;
   s.placeBall(CX, -0.3);
   run(s, 1.5, NONE);
   const up = [...s.targets.values()].every((t) => !t.down);
-  check('banque de cibles', n === 5 && ev.includes('bank') && up, `${n} cibles, banque=${ev.includes('bank')}, relevées=${up}`);
+  check('cibles', sond === 3 && ret === 3 && ev.some((e) => e.type === 'bank') && up, `sondages=${sond}, retour=${ret}, relevées=${up}`);
 }
 
 // 13. Couloir extérieur gauche : la bille y tombe et est perdue
 {
   const s = fresh();
-  s.placeBall(TABLE.minX + 0.018, 0.2);
+  s.placeBall(TABLE.minX + 0.018, 0.21);
   const ev = collect(s, 2);
   check('perte par outlane', ev.includes('drain'), `événements: ${[...new Set(ev)].join(', ')}`);
 }
@@ -170,13 +174,63 @@ const collect = (s: Sim, seconds: number, input: Input = NONE) => {
 // 14. Tilt : secousses répétées → 2 avertissements puis tilt, flippers coupés
 {
   const s = fresh();
-  s.placeBall(CX, -0.2);
+  s.placeBall(CX, 0.0);
   const ev: string[] = [];
   for (let i = 0; i < 9; i++) { s.nudge(1, 0); ev.push(...collect(s, 0.15)); }
   const warn = ev.filter((e) => e === 'warning').length;
   const angle = s.flippers[0].angle;
   run(s, 0.2, { ...NONE, left: true });
   check('tilt', warn === 2 && ev.includes('tilt') && s.flippers[0].angle === angle, `avertissements=${warn}, tilt=${ev.includes('tilt')}`);
+}
+
+// 15. Orbite : tir dans l'orbite droite → tour par l'arche, ressort à gauche dans le jeu
+{
+  const s = fresh();
+  s.placeBall(PLAY_MAX_X - ORBIT_W / 2, 0.06, 0, -2.6);
+  let topSeen = false, leftSeen = false;
+  run(s, 2.5, NONE, () => {
+    const p = s.ballPos();
+    if (p.z < -0.45) topSeen = true;
+    if (topSeen && p.x < TABLE.minX + ORBIT_W && p.z > -0.1) leftSeen = true;
+  });
+  check('orbite droite → gauche', topSeen && leftSeen, `haut=${topSeen}, sortie gauche=${leftSeen}`);
+}
+
+// 16. Scoop : la bille entre dans le couloir, est capturée puis éjectée vers le bas
+{
+  const s = fresh();
+  s.placeBall(SHOTS.scoop, 0.05, 0, -1.8);
+  const ev = collect(s, 2.5);
+  check('scoop', ev.includes('hole') && ev.includes('kickout'), `événements: ${[...new Set(ev)].join(', ')}`);
+}
+
+// 17. Soucoupe : bille lente capturée, bille rapide passe par-dessus
+{
+  const s = fresh();
+  s.placeBall(SAUCER.x, SAUCER.z - 0.05, 0, 0.3);
+  const slow = collect(s, 1.0);
+  const s2 = fresh();
+  s2.placeBall(SAUCER.x, SAUCER.z - 0.08, 0, 1.5);
+  const fast = collect(s2, 0.3);
+  check('soucoupe', slow.includes('hole') && !fast.includes('hole'), `lente=${slow.includes('hole')}, rapide=${fast.includes('hole')}`);
+}
+
+// 18. Porte du Recomposé : 7 coups ouvrent le couloir, puis la bille y est capturée
+{
+  const s = fresh();
+  const ev: string[] = [];
+  for (let i = 0; i < 7; i++) { s.placeBall(SHOTS.gate, 0.0, 0, -1.6); ev.push(...collect(s, 0.4)); }
+  s.placeBall(SHOTS.gate, 0.0, 0, -1.6);
+  ev.push(...collect(s, 1.5));
+  check('porte du Recomposé', s.gateOpen && ev.filter((e) => e === 'gate').length === 7 && ev.includes('hole'), `coups=${ev.filter((e) => e === 'gate').length}, ouverte=${s.gateOpen}, capture=${ev.includes('hole')}`);
+}
+
+// 19. Spinner : la boucle centrale fait tourner le spinner et mène aux bumpers
+{
+  const s = fresh();
+  s.placeBall(SHOTS.spinner, 0.05, 0, -2.2);
+  const ev = collect(s, 2);
+  check('spinner + bumpers', ev.includes('spinner') && ev.includes('bumper'), `événements: ${[...new Set(ev)].join(', ')}`);
 }
 
 console.log(failures ? `\n${failures} échec(s)` : '\nTous les tirs passent.');
