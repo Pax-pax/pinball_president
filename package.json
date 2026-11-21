@@ -7,7 +7,8 @@
     "test": "tsx test/sim.test.ts",
     "dev": "vite",
     "build": "vite build",
-    "sweep": "tsx test/sweep.ts"
+    "sweep": "tsx test/sweep.ts",
+    "stuck": "tsx test/stuck.ts"
   },
   "keywords": [],
   "author": "",

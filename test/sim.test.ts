@@ -107,7 +107,7 @@ const cradle = (s: Sim) => {
 // 8. Bumper : renvoie la bille avec au moins la vitesse de kick
 {
   const s = fresh();
-  s.placeBall(-0.045, -0.175, 0, -1.0);
+  s.placeBall(-0.045, -0.235, 0, -1.0);
   let hit = false, v = 0;
   run(s, 0.5, NONE, () => {
     for (const e of s.takeEvents()) if (e.type === 'bumper') { hit = true; v = s.ballSpeed(); }

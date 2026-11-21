@@ -66,7 +66,7 @@ export const RAMP_TOP = 0.064; // hauteur du sol des rampes en haut
 export const SHOTS = { rampL: -0.15, scoop: -0.093, gate: -0.04, spinner: 0.012, rampR: 0.068 } as const;
 export const SAUCER = { x: -0.185, z: 0.08 } as const;
 export const GATE_HITS = 7; // éléments de langage pour ouvrir le couloir du Recomposé
-export const SLING = { a: [-0.18, 0.205], b: [-0.18, 0.355], c: [-0.137, 0.384] } as const;
+export const SLING = { a: [-0.174, 0.2], b: [-0.174, 0.312], c: [-0.126, 0.35] } as const;
 
 export type Mat = 'wall' | 'metal' | 'rubber' | 'floor' | 'glass' | 'flipper' | 'bumper' | 'plunger' | 'ramp';
 const MATS: Record<Mat, { e: number; mu: number }> = {
@@ -370,8 +370,10 @@ export class Sim {
       this.cylinder(X(SEP_X), 0.232, 0.006, 'rubber');
       this.wall(X(SEP_X), 0.238, X(SEP_X), maxZ);
       // guide de l'inlane vers la base du flipper, et fermeture dessous
-      this.wall(X(SEP_X), 0.34, X(pl - 0.016), PIVOT_Z - 0.014, 'metal');
-      this.wall(X(pl - 0.016), PIVOT_Z - 0.014, X(pl - 0.016), maxZ, 'wall');
+      // le guide finit sous la base du flipper : la bille passe du guide au flipper sans creux
+      // face haute du guide alignée sur l'arête du flipper au repos (pente de 30°)
+      this.wall(X(SEP_X - 0.002), 0.348, X(pl - 0.002), PIVOT_Z - 0.0108, 'metal');
+      this.wall(X(pl - 0.012), PIVOT_Z, X(pl - 0.012), maxZ, 'wall');
       // slingshot (le grand côté a → c donne l'impulsion)
       const pts: [number, number][] = [SLING.a, SLING.b, SLING.c].map(([x, z]) => [X(x), z] as [number, number]);
       const c = this.prism(pts, 'rubber', WALL_H, `sling-${side}`);
@@ -437,10 +439,24 @@ export class Sim {
         path.push([ccx - rr * Math.cos(t), rcz - Math.abs(rr) * Math.sin(t), RAMP_TOP]);
       }
       path.push([xRet, 0.1, RAMP_TOP - 0.004], [xIn, 0.165, RAMP_TOP - 0.012]);
+      // montée pleine jusqu'en haut (on ne passe pas sous la rampe), puis épingle et retour suspendus
       this.ramp(path, 3);
+      // biseau sous l'épingle : une bille qui descend du haut glisse d'un côté ou de l'autre de la montée
+      const o = RAMP_W / 2 + 0.003;
+      this.prism([[xUp - o, rcz + 0.002], [xUp, rcz - 0.03], [xUp + o, rcz + 0.002]], 'metal', 0.05);
     }
 
+    // Toits derrière les couloirs centraux : tout ce qui tombe du haut est ramené vers la boucle du spinner
+    const rOut = RAMP_W / 2 + 0.003; // demi-largeur extérieure d'une montée de rampe
+    const spinL = SHOTS.spinner - LANE_HW - WT, spinR = SHOTS.spinner + LANE_HW + WT;
+    this.prism([[SHOTS.rampL + rOut, -0.128], [SHOTS.rampL + rOut, -0.25], [spinL + 0.002, -0.2], [spinL + 0.002, -0.152]], 'wall', WALL_H);
+    this.prism([[spinR - 0.002, -0.075], [spinR - 0.002, -0.2], [SHOTS.rampR - rOut, -0.24], [SHOTS.rampR - rOut, -0.075]], 'wall', WALL_H);
+    this.prism([[SHOTS.rampL + rOut, -0.06], [SHOTS.rampL + rOut, -0.13], [SHOTS.scoop - LANE_HW - WT, -0.13], [SHOTS.scoop - LANE_HW - WT, -0.06]], 'wall', WALL_H);
+
     // Cibles : 3 sondages tombants contre le mur gauche, 3 cibles fixes R-E-T-O-U-R contre le mur droit
+    // petits biseaux au-dessus des banques : une bille qui longe le mur passe devant les cibles
+    this.prism([[minX, 0.083], [minX, 0.112], [minX + 0.023, 0.112]], 'metal', 0.03);
+    this.prism([[PLAY_MAX_X, 0.083], [PLAY_MAX_X, 0.106], [PLAY_MAX_X - 0.02, 0.106]], 'metal', 0.03);
     for (let i = 0; i < 3; i++) {
       this.addTarget(`sondage${i + 1}`, 'sondage', minX + 0.012, 0.125 + i * 0.03, 1, true);
       this.addTarget(`retour${i + 1}`, 'retour', PLAY_MAX_X - 0.006, 0.115 + i * 0.03, -1, false);
@@ -448,9 +464,9 @@ export class Sim {
 
     // Bumpers en haut, alimentés par la boucle centrale et les orbites trop molles
     const bumperPos: [string, number, number][] = [
-      ['b1', -0.085, -0.29],
-      ['b2', -0.005, -0.315],
-      ['b3', -0.045, -0.235],
+      ['b1', -0.085, -0.34],
+      ['b2', 0.005, -0.36],
+      ['b3', -0.045, -0.275],
     ];
     for (const [id, x, z] of bumperPos) {
       const c = this.cylinder(x, z, BUMPER_R, 'bumper', id);
@@ -583,6 +599,19 @@ export class Sim {
     // Bumpers actifs : impulsion propre au contact
     for (const b of this.bumpers.values()) b.cooldown = Math.max(0, b.cooldown - DT);
     for (const s of this.slings.values()) s.cooldown = Math.max(0, s.cooldown - DT);
+    // un bumper frappe aussi une bille posée contre lui (comme un vrai pop bumper)
+    if (!this.tilted) for (const [h, b] of this.bumpers) {
+      if (b.cooldown > 0) continue;
+      let touching = false;
+      this.world.contactPair(this.ballCollider, this.world.getCollider(h), (m) => {
+        for (let k = 0; k < m.numContacts(); k++) if (m.contactDist(k) < 0.0005) touching = true;
+      });
+      if (touching) {
+        b.cooldown = 0.06;
+        this.kickFrom(b.x, b.z, BUMPER_KICK);
+        this.events.push({ type: 'bumper', id: b.id });
+      }
+    }
     this.queue.drainCollisionEvents((h1, h2, started) => {
       if (!started) return;
       const other = h1 === this.ballCollider.handle ? h2 : h2 === this.ballCollider.handle ? h1 : -1;
