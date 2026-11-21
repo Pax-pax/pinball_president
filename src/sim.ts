@@ -31,9 +31,17 @@ export const FLIP_TIP_R = 0.0065;
 export const FLIP_H = 0.022;
 export const FLIP_REST = (30 * Math.PI) / 180; // pointe vers le bas
 export const FLIP_UP = (-25 * Math.PI) / 180; // 55° de course
-export const FLIP_W_UP = 40; // rad/s en pointe (course complète ≈ 30 ms)
-export const FLIP_W_DOWN = 16;
-export const FLIP_ACCEL = 3300; // rad/s², pleine vitesse en ~12 ms comme une bobine
+// Bobine (modèle en couple) : le courant monte en ~30 ms (exponentielle), le flipper atteint la fin de course
+// en ~28 ms, puis l'interrupteur de fin de course (EOS) passe sur l'enroulement de maintien, plus faible.
+export const COIL_TAU = 0.008; // s, constante de temps de montée du courant (95 % en ~25-30 ms)
+export const COIL_TAU_OFF = 0.004; // s, retombée du courant au relâcher
+export const FLIP_ALPHA = 4200; // rad/s², accélération à pleine puissance
+export const EOS_ANGLE = (5 * Math.PI) / 180; // zone de fin de course
+export const EOS_HOLD = 0.3; // puissance de maintien en fin de course (fraction de la pleine puissance)
+export const FLIP_RETURN = 0.08 * 4200; // rad/s², ressort de rappel
+export const FLIP_INERTIA = 8e-4; // kg·m², flipper + axe + tringlerie ramenés à l'axe
+export const LIVE_CATCH_WINDOW = 0.016; // s après l'arrivée en fin de course : le caoutchouc absorbe le choc
+export const ROLLING_RESISTANCE = 0.003; // coefficient de résistance au roulement acier sur plateau verni (ordre de grandeur)
 export const PIVOT_Z = 0.42;
 export const PIVOT_DX = 0.095;
 
@@ -68,17 +76,23 @@ export const SAUCER = { x: -0.185, z: 0.08 } as const;
 export const GATE_HITS = 7; // éléments de langage pour ouvrir le couloir du Recomposé
 export const SLING = { a: [-0.174, 0.2], b: [-0.174, 0.312], c: [-0.126, 0.35] } as const;
 
-export type Mat = 'wall' | 'metal' | 'rubber' | 'floor' | 'glass' | 'flipper' | 'bumper' | 'plunger' | 'ramp';
-const MATS: Record<Mat, { e: number; mu: number }> = {
-  floor: { e: 0.2, mu: 0.25 },
-  wall: { e: 0.45, mu: 0.2 },
-  metal: { e: 0.35, mu: 0.1 },
-  rubber: { e: 0.7, mu: 0.5 },
-  glass: { e: 0.3, mu: 0.0 },
-  flipper: { e: 0.55, mu: 0.5 },
-  bumper: { e: 0.6, mu: 0.3 },
-  plunger: { e: 0.0, mu: 0.3 },
-  ramp: { e: 0.3, mu: 0.12 }, // plastique transparent
+export type Mat = 'wall' | 'metal' | 'rubber' | 'floor' | 'glass' | 'flipper' | 'bumper' | 'plunger' | 'ramp' | 'target';
+/**
+ * Matériaux : e = élasticité à faible vitesse, fo = baisse de l'élasticité avec la vitesse d'impact
+ * (e(v) = e / (1 + fo · v), v en m/s), mu = frottement. Valeurs de départ reprises des réglages de référence
+ * de la communauté Visual Pinball X, calés sur de vraies machines.
+ */
+export const MATS: Record<Mat, { e: number; fo: number; mu: number }> = {
+  floor: { e: 0.25, fo: 0, mu: 0.12 }, // plateau verni
+  wall: { e: 0.42, fo: 0, mu: 0.3 }, // plastiques et bois des côtés
+  metal: { e: 0.4, fo: 0, mu: 0.05 }, // guides et rails métalliques
+  rubber: { e: 0.9, fo: 0.1, mu: 0.3 }, // caoutchoucs (poteaux, slingshots)
+  target: { e: 0.625, fo: 0.1, mu: 0.3 }, // cibles
+  glass: { e: 0.3, fo: 0, mu: 0.0 },
+  flipper: { e: 0.8, fo: 0.15, mu: 0.85 }, // caoutchouc du flipper
+  bumper: { e: 0.9, fo: 0.1, mu: 0.3 },
+  plunger: { e: 0.0, fo: 0, mu: 0.3 },
+  ramp: { e: 0.4, fo: 0.2, mu: 0.3 }, // rampes en plastique
 };
 
 export type StaticPart =
@@ -166,8 +180,10 @@ export interface FlipperState {
   side: 'left' | 'right';
   pivot: [number, number];
   angle: number;
-  omega: number;
+  omega: number; // dθ/dt, positif vers le repos
   held: boolean;
+  coil: number; // courant de la bobine, 0 → 1
+  eosTime: number; // instant d'arrivée en fin de course (-1 si pas en fin de course)
 }
 
 /** Points de l'enveloppe convexe d'un flipper, construit le long de +x (gauche) ou -x (droite). */
@@ -208,6 +224,9 @@ export class Sim {
   bankResetTimer = -1;
   holes: Hole[] = [];
   orbitFlag = false;
+  matOf = new Map<number, Mat>();
+  flipperByHandle = new Map<number, FlipperState>();
+  private vPre = { x: 0, y: 0, z: 0 };
   captured: { hole: Hole; t: number } | null = null;
   holeCooldown = 0;
   gate!: import('@dimforge/rapier3d-compat').Collider;
@@ -246,7 +265,9 @@ export class Sim {
       .setFriction(m.mu)
       .setRestitutionCombineRule(this.R.CoefficientCombineRule.Max)
       .setFrictionCombineRule(this.R.CoefficientCombineRule.Max);
-    return this.world.createCollider(desc, body);
+    const c = this.world.createCollider(desc, body);
+    this.matOf.set(c.handle, mat);
+    return c;
   }
 
   private box(cx: number, cy: number, cz: number, hx: number, hy: number, hz: number, rotY: number, mat: Mat, visible = true, q?: Q) {
@@ -328,7 +349,7 @@ export class Sim {
     const d = this.R.ColliderDesc.cuboid(0.003, 0.0175, 0.0125)
       .setTranslation(x, 0.0175, z)
       .setActiveEvents(this.R.ActiveEvents.COLLISION_EVENTS);
-    const col = this.collider(d, drops ? 'wall' : 'rubber');
+    const col = this.collider(d, 'target');
     this.targets.set(col.handle, { id, group, collider: col, x, z, nx, drops, down: false });
   }
 
@@ -387,6 +408,8 @@ export class Sim {
       const s = side === 'left' ? 1 : -1;
       const inner = wallX + s * (ORBIT_W + WT / 2);
       this.wall(inner, ORBIT_MOUTH_Z, inner, -0.25, 'metal');
+      // bout pointu en haut du mur : une bille ne peut pas se poser dessus
+      this.prism([[inner - WT / 2, -0.25 - WT / 2 + 0.001], [inner, -0.25 - WT / 2 - 0.012], [inner + WT / 2, -0.25 - WT / 2 + 0.001]], 'metal', WALL_H);
       this.wall(wallX, ORBIT_MOUTH_Z + 0.02, wallX + s * (ORBIT_W + 0.002), ORBIT_MOUTH_Z + 0.08, 'metal');
     }
 
@@ -454,12 +477,11 @@ export class Sim {
     this.prism([[SHOTS.rampL + rOut, -0.06], [SHOTS.rampL + rOut, -0.13], [SHOTS.scoop - LANE_HW - WT, -0.13], [SHOTS.scoop - LANE_HW - WT, -0.06]], 'wall', WALL_H);
 
     // Cibles : 3 sondages tombants contre le mur gauche, 3 cibles fixes R-E-T-O-U-R contre le mur droit
-    // petits biseaux au-dessus des banques : une bille qui longe le mur passe devant les cibles
-    this.prism([[minX, 0.083], [minX, 0.112], [minX + 0.023, 0.112]], 'metal', 0.03);
-    this.prism([[PLAY_MAX_X, 0.083], [PLAY_MAX_X, 0.106], [PLAY_MAX_X - 0.02, 0.106]], 'metal', 0.03);
+    // cibles détachées du mur (un couloir de 35 mm derrière) : rien ne peut se coincer contre elles
+    const behind = 0.035 + 0.003;
     for (let i = 0; i < 3; i++) {
-      this.addTarget(`sondage${i + 1}`, 'sondage', minX + 0.012, 0.125 + i * 0.03, 1, true);
-      this.addTarget(`retour${i + 1}`, 'retour', PLAY_MAX_X - 0.006, 0.115 + i * 0.03, -1, false);
+      this.addTarget(`sondage${i + 1}`, 'sondage', minX + behind, 0.125 + i * 0.03, 1, true);
+      this.addTarget(`retour${i + 1}`, 'retour', PLAY_MAX_X - behind, 0.115 + i * 0.03, -1, false);
     }
 
     // Bumpers en haut, alimentés par la boucle centrale et les orbites trop molles
@@ -481,7 +503,8 @@ export class Sim {
       );
       const hull = R.ColliderDesc.convexHull(flipperHullPoints(side))!;
       this.collider(hull, 'flipper', body);
-      const f: FlipperState = { body, side, pivot: [px, PIVOT_Z], angle: FLIP_REST, omega: 0, held: false };
+      const f: FlipperState = { body, side, pivot: [px, PIVOT_Z], angle: FLIP_REST, omega: 0, held: false, coil: 0, eosTime: -1 };
+      this.flipperByHandle.set(body.collider(0).handle, f);
       this.setFlipperRotation(f, false);
       this.flippers.push(f);
     }
@@ -549,27 +572,27 @@ export class Sim {
 
   // ---------- Pas de simulation ----------
   step(input: Input) {
-    // Flippers : vitesse angulaire bornée, forte accélération, comme une bobine
+    // Flippers : bobine qui monte en puissance, fin de course avec maintien plus faible, ressort de rappel
     for (const f of this.flippers) {
       const held = !this.tilted && (f.side === 'left' ? input.left : input.right);
       if (held && !f.held) this.events.push({ type: 'flip', side: f.side });
       f.held = held;
-      const target = held ? FLIP_UP : FLIP_REST;
-      const wMax = held ? FLIP_W_UP : FLIP_W_DOWN;
-      const dir = Math.sign(target - f.angle);
-      if (dir === 0 || Math.abs(target - f.angle) < 1e-6) {
-        f.omega = 0;
-      } else {
-        // la vitesse repart de zéro si on change de sens
-        if (Math.sign(f.omega) !== dir) f.omega = 0;
-        f.omega = dir * Math.min(Math.abs(f.omega) + FLIP_ACCEL * DT, wMax);
-        let a = f.angle + f.omega * DT;
-        if ((dir > 0 && a > target) || (dir < 0 && a < target)) {
-          a = target;
-          f.omega = 0;
-        }
-        f.angle = a;
+      f.coil += ((held ? 1 : 0) - f.coil) * (1 - Math.exp(-DT / (held ? COIL_TAU : COIL_TAU_OFF)));
+      const atEOS = f.angle <= FLIP_UP + EOS_ANGLE;
+      // θ diminue vers le haut : la bobine pousse en négatif, le ressort en positif
+      const acc = -FLIP_ALPHA * f.coil * (atEOS ? EOS_HOLD : 1) + FLIP_RETURN;
+      f.omega += acc * DT;
+      let a = f.angle + f.omega * DT;
+      if (a <= FLIP_UP) {
+        a = FLIP_UP;
+        if (f.omega < 0) f.omega = 0;
+        if (f.eosTime < 0) f.eosTime = this.time;
+      } else if (a > FLIP_UP + EOS_ANGLE) f.eosTime = -1;
+      if (a >= FLIP_REST) {
+        a = FLIP_REST;
+        if (f.omega > 0) f.omega = 0;
       }
+      f.angle = a;
       this.setFlipperRotation(f);
     }
 
@@ -593,6 +616,8 @@ export class Sim {
     }
     this.plunger.setNextKinematicTranslation({ x: LANE_X, y: PLUNGER_HALF.y, z: PLUNGER_REST_Z + this.plungerPull });
 
+    const vp = this.ball.linvel();
+    this.vPre = { x: vp.x, y: vp.y, z: vp.z };
     this.world.step(this.queue);
     this.time += DT;
 
@@ -612,51 +637,16 @@ export class Sim {
         this.events.push({ type: 'bumper', id: b.id });
       }
     }
+    const hits: number[] = [];
     this.queue.drainCollisionEvents((h1, h2, started) => {
       if (!started) return;
       const other = h1 === this.ballCollider.handle ? h2 : h2 === this.ballCollider.handle ? h1 : -1;
-      const b = this.bumpers.get(other);
-      if (b) {
-        if (b.cooldown > 0 || this.tilted) return;
-        b.cooldown = 0.06;
-        this.kickFrom(b.x, b.z, BUMPER_KICK);
-        this.events.push({ type: 'bumper', id: b.id });
-        return;
-      }
-      const s = this.slings.get(other);
-      if (s) {
-        if (s.cooldown > 0 || this.tilted) return;
-        this.slingKick(s);
-        return;
-      }
-      if (other === this.gate.handle && !this.gateOpen) {
-        this.gateHits++;
-        this.events.push({ type: 'gate', hits: this.gateHits });
-        if (this.gateHits >= GATE_HITS) { this.setGateOpen(true); this.events.push({ type: 'gateOpen' }); }
-        return;
-      }
-      if (other === this.spinnerSensor.handle) {
-        const v = this.ball.linvel();
-        const speed = Math.hypot(v.x, v.z);
-        const spins = Math.max(1, Math.round(speed * 5));
-        this.spinnerVel = Math.sign(-v.z || 1) * speed * 60;
-        this.events.push({ type: 'spinner', spins });
-        return;
-      }
-      const t = this.targets.get(other);
-      if (t && !t.down) {
-        this.events.push({ type: 'target', id: t.id, group: t.group });
-        if (t.drops) {
-          t.down = true;
-          t.collider.setEnabled(false);
-          const bank = [...this.targets.values()].filter((x) => x.group === t.group);
-          if (bank.every((x) => x.down)) {
-            this.events.push({ type: 'bank' });
-            this.bankResetTimer = TARGET_RESET_DELAY;
-          }
-        }
-      }
+      if (other !== -1) hits.push(other);
     });
+    for (const other of hits) {
+      this.correctBounce(other);
+      this.handleHit(other);
+    }
     this.updateHoles();
     this.spinnerAngle += this.spinnerVel * DT;
     this.spinnerVel *= Math.exp(-1.5 * DT);
@@ -665,6 +655,16 @@ export class Sim {
       if (this.bankResetTimer < 0) this.resetTargets();
     }
     this.trackRamp();
+    // résistance au roulement sur le plateau
+    {
+      const p = this.ball.translation();
+      if (p.y < BALL_R + 0.002 && !this.captured) {
+        const v = this.ball.linvel();
+        const sp = Math.hypot(v.x, v.z);
+        const dv = ROLLING_RESISTANCE * G * Math.cos(TILT) * DT;
+        if (sp > dv) this.ball.setLinvel({ x: v.x * (1 - dv / sp), y: v.y, z: v.z * (1 - dv / sp) }, true);
+      }
+    }
     // Orbite : la bille passe sous l'arche, tout en haut de la table
     {
       const p = this.ball.translation();
@@ -688,6 +688,106 @@ export class Sim {
     }
 
     this.prevInput = { ...input };
+  }
+
+  private handleHit(other: number) {
+    const b = this.bumpers.get(other);
+    if (b) {
+      if (b.cooldown > 0 || this.tilted) return;
+      b.cooldown = 0.06;
+      this.kickFrom(b.x, b.z, BUMPER_KICK);
+      this.events.push({ type: 'bumper', id: b.id });
+      return;
+    }
+    const s = this.slings.get(other);
+    if (s) {
+      if (s.cooldown > 0 || this.tilted) return;
+      this.slingKick(s);
+      return;
+    }
+    if (other === this.gate.handle && !this.gateOpen) {
+      this.gateHits++;
+      this.events.push({ type: 'gate', hits: this.gateHits });
+      if (this.gateHits >= GATE_HITS) { this.setGateOpen(true); this.events.push({ type: 'gateOpen' }); }
+      return;
+    }
+    if (other === this.spinnerSensor.handle) {
+      const v = this.ball.linvel();
+      const speed = Math.hypot(v.x, v.z);
+      const spins = Math.max(1, Math.round(speed * 5));
+      this.spinnerVel = Math.sign(-v.z || 1) * speed * 60;
+      this.events.push({ type: 'spinner', spins });
+      return;
+    }
+    const t = this.targets.get(other);
+    if (t && !t.down) {
+      this.events.push({ type: 'target', id: t.id, group: t.group });
+      if (t.drops) {
+        t.down = true;
+        t.collider.setEnabled(false);
+        const bank = [...this.targets.values()].filter((x) => x.group === t.group);
+        if (bank.every((x) => x.down)) {
+          this.events.push({ type: 'bank' });
+          this.bankResetTimer = TARGET_RESET_DELAY;
+        }
+      }
+    }
+  }
+
+  /**
+   * Rebond réaliste après un choc : l'élasticité baisse avec la vitesse d'impact (caoutchoucs, flippers, rampes).
+   * Sur un flipper levé en fin de course, le flipper cède (masse finie) et peut absorber la bille (live catch).
+   */
+  private correctBounce(other: number) {
+    const mat = this.matOf.get(other);
+    if (!mat || mat === 'bumper' || mat === 'floor' || mat === 'glass') return;
+    const f = this.flipperByHandle.get(other);
+    const m = MATS[mat];
+    if (m.e === 0) return;
+    // normale de contact : du point le plus proche de la surface vers le centre de la bille
+    const col = this.world.getCollider(other);
+    if (col.isSensor() || !col.isEnabled()) return;
+    // les biseaux et toits (blocs convexes) gardent le rebond du solveur, sauf les slingshots
+    if (!f && col.shapeType() === this.R.ShapeType.ConvexPolyhedron && !this.slings.has(other)) return;
+    const p = this.ball.translation();
+    const proj = col.projectPoint(p, true);
+    if (!proj || proj.isInside) return;
+    let nx = p.x - proj.point.x, ny = p.y - proj.point.y, nz = p.z - proj.point.z;
+    const l = Math.hypot(nx, ny, nz);
+    if (l < 1e-6 || l > BALL_R * 1.6) return;
+    nx /= l; ny /= l; nz /= l;
+    // seulement les chocs latéraux (pas le sol d'une rampe ni le dessus d'un mur)
+    if (Math.abs(ny) > 0.5) return;
+    // vitesse de la surface au point de contact (rotation du flipper)
+    let sx = 0, sz = 0, rx = 0, rz = 0;
+    if (f) {
+      const wy = (f.side === 'left' ? -1 : 1) * f.omega;
+      rx = p.x - nx * BALL_R - f.pivot[0];
+      rz = p.z - nz * BALL_R - f.pivot[1];
+      sx = wy * rz; sz = -wy * rx;
+    }
+    const approach = -((this.vPre.x - sx) * nx + this.vPre.y * ny + (this.vPre.z - sz) * nz);
+    if (approach < 0.05) return;
+    const v = this.ball.linvel();
+    const vrx = v.x - sx, vry = v.y, vrz = v.z - sz;
+    const vnRapier = vrx * nx + vry * ny + vrz * nz;
+    // le solveur perd une partie du rebond sur les contacts anticipés : on impose nous-mêmes la vitesse de sortie
+    let e = m.e / (1 + m.fo * approach);
+    let tangent = 1;
+    if (f && f.held && f.angle <= FLIP_UP + EOS_ANGLE) {
+      // le flipper levé n'est retenu que par l'enroulement de maintien : il cède sous le choc
+      const r = Math.max(0.015, Math.hypot(rx, rz));
+      const mf = FLIP_INERTIA / (r * r);
+      e *= mf / (mf + BALL_MASS);
+      f.omega += (BALL_MASS * (1 + e) * approach * r) / FLIP_INERTIA;
+      if (f.eosTime >= 0 && this.time - f.eosTime <= LIVE_CATCH_WINDOW) {
+        e *= 0.15;
+        tangent = 0.6;
+      }
+    }
+    const vnOut = e * approach;
+    const vtx = vrx - vnRapier * nx, vty = vry - vnRapier * ny, vtz = vrz - vnRapier * nz;
+    this.ball.setLinvel({ x: sx + vtx * tangent + vnOut * nx, y: vty * tangent + vnOut * ny, z: sz + vtz * tangent + vnOut * nz }, true);
   }
 
   /** Slingshot : seulement si la bille touche le grand côté (a → c), impulsion perpendiculaire vers le jeu. */

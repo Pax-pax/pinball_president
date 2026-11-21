@@ -58,7 +58,7 @@ scene.add(sun);
 
 const colors: Record<Mat, number> = {
   wall: 0xd9d4c7, metal: 0xb8bcc4, rubber: 0x222222, floor: 0x2b3a55, glass: 0xffffff,
-  flipper: 0xf2f2f2, bumper: 0xe8423c, plunger: 0x999999, ramp: 0x9fd8ff,
+  flipper: 0xf2f2f2, bumper: 0xe8423c, plunger: 0x999999, ramp: 0x9fd8ff, target: 0xffd34d,
 };
 const mats: Partial<Record<Mat, THREE.MeshStandardMaterial>> = {};
 const matFor = (m: Mat) =>
@@ -110,7 +110,7 @@ function floorTexture() {
   insert(SHOTS.rampR, 0.06, C.union.nom, C.union.couleur);
   insert(TABLE.minX + ORBIT_W / 2 + 0.002, -0.1, C.tribun.nom, C.tribun.couleur, -Math.PI / 2, 18);
   insert(PLAY_MAX_X - ORBIT_W / 2 - 0.002, -0.1, C.tribun.nom, C.tribun.couleur, -Math.PI / 2, 18);
-  insert(0.175, 0.145, C.revenant.nom, C.revenant.couleur, -Math.PI / 2, 18);
+  insert(0.155, 0.145, C.revenant.nom, C.revenant.couleur, -Math.PI / 2, 18);
   insert(-0.045, -0.385, C.heritiere.nom, C.heritiere.couleur, 0, 20);
   // trous
   g.globalAlpha = 1;

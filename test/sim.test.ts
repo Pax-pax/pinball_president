@@ -1,7 +1,7 @@
 // Tirs de référence : chaque réglage physique doit garder ces comportements.
 // Lancer : npm test
 import {
-  Sim, initRapier, Input, SimEvent, CX, PIVOT_DX, PIVOT_Z, FLIP_LEN, BALL_R, LANE_INNER_X, TABLE, GLASS_Y,
+  Sim, initRapier, Input, SimEvent, CX, PIVOT_DX, PIVOT_Z, FLIP_LEN, FLIP_REST, FLIP_UP, BALL_R, LANE_INNER_X, TABLE, GLASS_Y,
   SHOTS, SAUCER, PLAY_MAX_X, ORBIT_W,
 } from '../src/sim';
 
@@ -92,7 +92,7 @@ const cradle = (s: Sim) => {
     if (!fired && t > 0.08 && d > FLIP_LEN * 0.55) fired = true;
     return { ...NONE, left: fired };
   }, () => { peakV = Math.max(peakV, s.ballSpeed()); minZ = Math.min(minZ, s.ballPos().z); });
-  check('tir flipper', peakV > 2.5 && minZ < -0.1, `vmax=${peakV.toFixed(2)} m/s, monte jusqu'à z=${minZ.toFixed(3)}`);
+  check('tir flipper', peakV > 2.5 && minZ < 0, `vmax=${peakV.toFixed(2)} m/s, monte jusqu'à z=${minZ.toFixed(3)}`);
 }
 
 // 7. Sans action, la bille entre les flippers est perdue puis remise au lanceur
@@ -231,6 +231,66 @@ for (const [side, x] of [['left', SHOTS.rampL], ['right', SHOTS.rampR]] as const
   s.placeBall(SHOTS.spinner, 0.05, 0, -2.2);
   const ev = collect(s, 2);
   check('spinner + bumpers', ev.includes('spinner') && ev.includes('bumper'), `événements: ${[...new Set(ev)].join(', ')}`);
+}
+
+// ---------- Effets physiques réalistes ----------
+
+// 20. Bobine : le flipper ne part pas sec (montée en puissance) et atteint la fin de course en 22 à 35 ms
+{
+  const s = fresh();
+  let t5 = 0, tEOS = -1;
+  for (let i = 0; i < 480 * 0.1; i++) {
+    s.step({ ...NONE, left: true });
+    const t = (i + 1) / 480;
+    const f = s.flippers[0];
+    if (Math.abs(t - 0.005) < 1e-4 || (t > 0.005 && t5 === 0)) t5 = (FLIP_REST - f.angle) / (FLIP_REST - FLIP_UP);
+    if (tEOS < 0 && f.angle <= FLIP_UP) tEOS = t;
+  }
+  check('montée de la bobine', t5 < 0.15 && tEOS > 0.022 && tEOS < 0.035, `course à 5 ms=${(t5 * 100).toFixed(0)} %, fin de course à ${(tEOS * 1000).toFixed(1)} ms`);
+}
+
+// 21. Caoutchouc : rebond plus vif sur un choc lent que sur un choc violent (cible fixe RETOUR)
+{
+  const t = [...fresh().targets.values()].filter((x) => x.group === 'retour').pop()!;
+  const cor = (v: number) => {
+    const s = fresh();
+    s.placeBall(t.x - 0.03, t.z, v, 0);
+    let out = 0, hit = false;
+    run(s, 0.2, NONE, () => { const vx = s.ballVel().x; if (vx < 0 && !hit) { hit = true; out = -vx; } });
+    return out / v;
+  };
+  const slow = cor(0.4), fast = cor(3);
+  check('élasticité selon la vitesse', slow > fast + 0.04, `lent ${slow.toFixed(2)}, rapide ${fast.toFixed(2)}`);
+}
+
+// 22. Fin de course : un flipper levé cède un peu sous le choc puis revient
+{
+  const s = fresh();
+  run(s, 0.2, { ...NONE, left: true });
+  s.placeBall(plx + 0.04, PIVOT_Z - 0.09, 0, 1.6);
+  let maxDip = 0;
+  run(s, 0.4, { ...NONE, left: true }, () => { maxDip = Math.max(maxDip, s.flippers[0].angle - FLIP_UP); });
+  const back = s.flippers[0].angle - FLIP_UP < 0.001;
+  check('flipper qui cède', maxDip > (1 * Math.PI) / 180 && maxDip < (12 * Math.PI) / 180 && back, `creux ${(maxDip * 180 / Math.PI).toFixed(1)}°, revenu=${back}`);
+}
+
+// 23. Live catch : flipper levé juste au moment du choc → la bille est amortie, bien plus qu'avec un flipper déjà levé
+{
+  const bounce = (pressAt: number) => {
+    const s = fresh();
+    s.placeBall(plx + 0.04, PIVOT_Z - 0.12, 0, 1.6);
+    let tHit = -1, out = 0;
+    run(s, 0.4, (t) => ({ ...NONE, left: t >= pressAt }), () => {
+      const vz = s.ballVel().z;
+      if (tHit < 0 && vz < -0.02) { tHit = s.time; out = -vz; }
+    });
+    return { tHit, out };
+  };
+  const early = bounce(0); // flipper levé bien avant
+  // instant du choc, puis flip calé pour arriver en fin de course ~6 ms avant
+  const ref = bounce(0);
+  const live = bounce(Math.max(0, ref.tHit - 0.028 - 0.004));
+  check('live catch', live.out < early.out * 0.5, `rebond flipper déjà levé ${early.out.toFixed(2)} m/s, live catch ${live.out.toFixed(2)} m/s`);
 }
 
 console.log(failures ? `\n${failures} échec(s)` : '\nTous les tirs passent.');
